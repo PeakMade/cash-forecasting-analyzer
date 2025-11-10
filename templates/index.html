@@ -1,0 +1,312 @@
+{% extends "base.html" %}
+
+{% block extra_styles %}
+<style>
+    .form-group {
+        margin-bottom: 25px;
+    }
+    
+    .form-group label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+        color: #555;
+    }
+    
+    .form-group input[type="text"],
+    .form-group input[type="file"] {
+        width: 100%;
+        padding: 12px;
+        border: 2px solid #e0e0e0;
+        border-radius: 5px;
+        font-size: 1rem;
+        transition: border-color 0.3s;
+    }
+    
+    .form-group input:focus {
+        outline: none;
+        border-color: #667eea;
+    }
+    
+    .file-upload {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+        border: 2px dashed #d0d0d0;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+    
+    .file-upload:hover {
+        border-color: #667eea;
+        background: #f0f4ff;
+    }
+    
+    .file-upload.has-file {
+        border-color: #28a745;
+        background: #f0fff4;
+    }
+    
+    .btn {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 15px 40px;
+        border: none;
+        border-radius: 5px;
+        font-size: 1.1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.2s;
+        width: 100%;
+        margin-top: 20px;
+    }
+    
+    .btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+    }
+    
+    .btn:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+        transform: none;
+    }
+    
+    .section-title {
+        font-size: 1.5rem;
+        color: #667eea;
+        margin: 30px 0 20px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid #e0e0e0;
+    }
+    
+    .loading {
+        display: none;
+        text-align: center;
+        padding: 40px;
+    }
+    
+    .loading.active {
+        display: block;
+    }
+    
+    .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #667eea;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    .help-text {
+        font-size: 0.9rem;
+        color: #777;
+        margin-top: 5px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="upload-form">
+    <h2>Upload Cash Forecast Analysis Files</h2>
+    <p class="help-text" style="margin-bottom: 30px;">
+        Upload the three required files and provide property information to begin analysis.
+    </p>
+    
+    <form id="analysisForm" enctype="multipart/form-data">
+        <div class="section-title">Property Information</div>
+        
+        <div class="form-group">
+            <label for="property_name">Property Name *</label>
+            <input type="text" id="property_name" name="property_name" required placeholder="e.g., Campus View Apartments">
+        </div>
+        
+        <div class="form-group">
+            <label for="property_address">Property Address *</label>
+            <input type="text" id="property_address" name="property_address" required placeholder="e.g., 123 University Blvd, College Town, ST">
+        </div>
+        
+        <div class="form-group">
+            <label for="zip_code">ZIP Code *</label>
+            <input type="text" id="zip_code" name="zip_code" required pattern="[0-9]{5}(-[0-9]{4})?" placeholder="e.g., 12345 or 12345-6789">
+            <div class="help-text">5-digit or ZIP+4 format</div>
+        </div>
+        
+        <div class="form-group">
+            <label for="university">Associated University *</label>
+            <input type="text" id="university" name="university" required placeholder="e.g., State University">
+        </div>
+        
+        <div class="section-title">Required Files</div>
+        
+        <div class="form-group">
+            <label for="cash_forecast">Cash Forecast Excel File *</label>
+            <div class="file-upload" id="cash_forecast_zone">
+                <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
+                <p>📊 Click to upload or drag file here</p>
+                <div class="help-text">Excel file with actuals and budget projections</div>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label for="gl_export">GL Export File *</label>
+            <div class="file-upload" id="gl_export_zone">
+                <input type="file" id="gl_export" name="gl_export" required accept=".xlsx,.xls,.csv">
+                <p>📋 Click to upload or drag file here</p>
+                <div class="help-text">General ledger export</div>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label for="analysis_file">Additional Analysis File *</label>
+            <div class="file-upload" id="analysis_file_zone">
+                <input type="file" id="analysis_file" name="analysis_file" required accept=".xlsx,.xls,.csv">
+                <p>📈 Click to upload or drag file here</p>
+                <div class="help-text">Supplemental analysis data</div>
+            </div>
+        </div>
+        
+        <button type="submit" class="btn">Analyze Cash Forecast</button>
+    </form>
+</div>
+
+<div id="loading" class="loading">
+    <div class="spinner"></div>
+    <h3>Analyzing Cash Forecast...</h3>
+    <p>This may take a moment as we gather economic data and validate assumptions.</p>
+</div>
+
+<div id="results" style="display:none;">
+    <div class="alert alert-success">
+        ✓ Analysis complete!
+    </div>
+    <div id="results-content"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// File upload handling
+['cash_forecast', 'gl_export', 'analysis_file'].forEach(fileId => {
+    const input = document.getElementById(fileId);
+    const zone = document.getElementById(fileId + '_zone');
+    
+    zone.addEventListener('click', () => input.click());
+    
+    input.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            zone.classList.add('has-file');
+            zone.querySelector('p').textContent = '✓ ' + e.target.files[0].name;
+        }
+    });
+    
+    // Drag and drop
+    zone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        zone.style.borderColor = '#667eea';
+    });
+    
+    zone.addEventListener('dragleave', () => {
+        zone.style.borderColor = '';
+    });
+    
+    zone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        zone.style.borderColor = '';
+        if (e.dataTransfer.files.length > 0) {
+            input.files = e.dataTransfer.files;
+            zone.classList.add('has-file');
+            zone.querySelector('p').textContent = '✓ ' + e.dataTransfer.files[0].name;
+        }
+    });
+});
+
+// Form submission
+document.getElementById('analysisForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    
+    // Show loading, hide form
+    document.getElementById('upload-form').style.display = 'none';
+    document.getElementById('loading').classList.add('active');
+    
+    try {
+        const response = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            displayResults(result);
+        } else {
+            showError(result.error || 'An error occurred during analysis');
+        }
+    } catch (error) {
+        showError('Network error: ' + error.message);
+    }
+});
+
+function displayResults(result) {
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('results').style.display = 'block';
+    
+    const summary = result.summary;
+    const bullets = summary.bullets || [];
+    
+    let html = `
+        <h2>Executive Summary: ${summary.property_name}</h2>
+        <p><strong>Analysis Date:</strong> ${new Date(summary.analysis_date).toLocaleString()}</p>
+        <p><strong>Recommendation Validation:</strong> ${summary.recommendation_validation}</p>
+        
+        <div style="margin: 30px 0; padding: 20px; background: #f8f9fa; border-radius: 5px;">
+            <h3>Key Findings:</h3>
+            <ul style="list-style: none; padding: 0;">
+    `;
+    
+    bullets.forEach(bullet => {
+        html += `
+            <li style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px; border-left: 4px solid #667eea;">
+                <strong>${bullet.id}.</strong> ${bullet.text}
+                ${bullet.has_details ? '<a href="#" style="color: #667eea; margin-left: 10px;">[Details]</a>' : ''}
+            </li>
+        `;
+    });
+    
+    html += `
+            </ul>
+        </div>
+        
+        <p style="margin-top: 30px;">
+            <a href="/" class="btn" style="display: inline-block; text-decoration: none;">Analyze Another Property</a>
+        </p>
+    `;
+    
+    document.getElementById('results-content').innerHTML = html;
+}
+
+function showError(message) {
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('upload-form').style.display = 'block';
+    
+    const alert = document.createElement('div');
+    alert.className = 'alert alert-error';
+    alert.textContent = '✗ ' + message;
+    
+    document.getElementById('upload-form').insertBefore(
+        alert,
+        document.getElementById('upload-form').firstChild
+    );
+}
+</script>
+{% endblock %}
