@@ -1,95 +1,171 @@
 """
 File Processor Service
-Parses Excel cash forecast, GL export, and analysis files
+Parses Excel cash forecast, PDF Income Statement, PDF Balance Sheet
+Integrates with Economic Analysis and Recommendation Engine
 """
 
 import pandas as pd
+import PyPDF2
+import re
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import logging
+import os
+
+from services.economic_analysis import EconomicAnalyzer
+from services.recommendation_engine import RecommendationEngine
 
 logger = logging.getLogger(__name__)
 
+
 class FileProcessor:
-    """Processes uploaded files and extracts relevant data"""
+    """Processes uploaded files and generates cash forecast recommendations"""
     
-    def process_files(self, 
-                     cash_forecast_path: str,
-                     gl_export_path: str,
-                     analysis_file_path: str,
-                     property_info: Dict[str, Any]) -> Dict[str, Any]:
+    def __init__(self, openai_api_key: str):
+        """Initialize with OpenAI API key for economic analysis"""
+        self.economic_analyzer = EconomicAnalyzer(api_key=openai_api_key)
+        self.recommendation_engine = RecommendationEngine()
+    
+    def process_and_analyze(self,
+                           cash_forecast_path: str,
+                           income_statement_path: str,
+                           balance_sheet_path: str,
+                           property_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process all uploaded files and extract data
+        Process all three required files and generate comprehensive recommendation
         
         Args:
             cash_forecast_path: Path to Excel cash forecast file
-            gl_export_path: Path to GL export file
-            analysis_file_path: Path to additional analysis file
-            property_info: Dictionary with property information
+            income_statement_path: Path to PDF income statement
+            balance_sheet_path: Path to PDF balance sheet
+            property_info: Dictionary with property information (name, university, address, etc.)
             
         Returns:
-            Dictionary containing parsed data from all files
+            Complete analysis with decision, executive summary, and detailed rationale
         """
-        logger.info(f"Processing files for property: {property_info['name']}")
+        logger.info(f"Processing files for property: {property_info.get('name', 'Unknown')}")
         
         try:
-            # Parse cash forecast Excel file
-            cash_data = self._parse_cash_forecast(cash_forecast_path)
+            # Step 1: Parse cash forecast
+            cash_data = self.parse_cash_forecast(cash_forecast_path)
             
-            # Parse GL export (format TBD - placeholder)
-            gl_data = self._parse_gl_export(gl_export_path)
+            # Override property_name with database value (more reliable than filename parsing)
+            cash_data['property_name'] = property_info.get('name', cash_data.get('property_name', 'Unknown'))
             
-            # Parse analysis file (format TBD - placeholder)
-            analysis_data = self._parse_analysis_file(analysis_file_path)
+            # Step 2: Parse income statement
+            income_data = self.parse_income_statement(income_statement_path)
+            
+            # Step 3: Parse balance sheet
+            balance_data = self.parse_balance_sheet(balance_sheet_path)
+            
+            # Step 4: Get economic analysis
+            economic_data = self.get_economic_context(
+                property_name=property_info.get('name', 'Unknown'),
+                university=property_info.get('university', 'Unknown'),
+                city=property_info.get('city', 'Unknown'),
+                state=property_info.get('state', 'Unknown'),
+                zip_code=property_info.get('zip', ''),
+                current_month=cash_data.get('current_month', 'Unknown')
+            )
+            
+            # Step 5: Generate recommendation
+            recommendation = self.recommendation_engine.analyze_and_recommend(
+                cash_forecast_data=cash_data,
+                income_statement_data=income_data,
+                balance_sheet_data=balance_data,
+                economic_analysis=economic_data
+            )
             
             return {
-                'cash_forecast': cash_data,
-                'gl_export': gl_data,
-                'analysis_file': analysis_data,
+                'success': True,
                 'property_info': property_info,
+                'recommendation': recommendation,
+                'raw_data': {
+                    'cash_forecast': cash_data,
+                    'income_statement': income_data,
+                    'balance_sheet': balance_data,
+                    'economic_analysis': economic_data
+                },
                 'processed_at': datetime.now().isoformat()
             }
             
         except Exception as e:
             logger.error(f"Error processing files: {str(e)}")
-            raise
+            return {
+                'success': False,
+                'error': str(e),
+                'property_info': property_info
+            }
     
-    def _parse_cash_forecast(self, file_path: str) -> Dict[str, Any]:
+    def parse_cash_forecast(self, file_path: str) -> Dict[str, Any]:
         """
-        Parse the Excel cash forecast file
-        
-        Expected structure (TBD - waiting for sample):
-        - Rows: Line items (revenue, expenses, etc.)
-        - Columns: Months
-        - Past months: Actuals
-        - Future months: Budget/Forecast
-        - Distribution/Contribution line for next month
+        Parse Excel cash forecast file
+        Extracts: Free Cash Flow, Distributions/Contributions, Occupancy data, Month info
         """
         logger.info(f"Parsing cash forecast: {file_path}")
         
         try:
-            # Read Excel file
-            df = pd.read_excel(file_path, sheet_name=0)
+            # Parse filename for property info
+            filename = os.path.basename(file_path)
+            entity_number, property_name, current_month = self._parse_cash_forecast_filename(filename)
             
-            # TODO: Implement actual parsing logic once we have sample file
-            # For now, return placeholder structure
+            # Read Excel file
+            df = pd.read_excel(file_path, sheet_name=0, header=None)
+            
+            # Find 2025 data columns (columns 79-93 based on prior analysis)
+            year_2025_cols = list(range(79, 94))  # Columns 79-93
+            
+            # Extract key rows (0-based indices)
+            status_row = df.iloc[6, year_2025_cols].tolist() if len(df) > 6 else []
+            month_row = df.iloc[7, year_2025_cols].tolist() if len(df) > 7 else []
+            budgeted_occ_row = df.iloc[4, year_2025_cols].tolist() if len(df) > 4 else []
+            actual_occ_row = df.iloc[5, year_2025_cols].tolist() if len(df) > 5 else []
+            distributions_row = df.iloc[47, year_2025_cols].tolist() if len(df) > 47 else []
+            fcf_row = df.iloc[48, year_2025_cols].tolist() if len(df) > 48 else []
+            
+            # Find current month (most recent "Actual") and next month (first "Budget")
+            current_month_idx = None
+            next_month_idx = None
+            
+            for i, status in enumerate(status_row):
+                if isinstance(status, str):
+                    if 'actual' in status.lower() and current_month_idx is None:
+                        current_month_idx = i
+                    elif 'budget' in status.lower() and current_month_idx is not None and next_month_idx is None:
+                        next_month_idx = i
+                        break
+            
+            # Extract data for current and projected months
+            current_month_name = month_row[current_month_idx] if current_month_idx is not None else 'Unknown'
+            projected_month_name = month_row[next_month_idx] if next_month_idx is not None else 'Unknown'
+            
+            current_fcf = fcf_row[current_month_idx] if current_month_idx is not None else 0
+            projected_fcf = fcf_row[next_month_idx] if next_month_idx is not None else 0
+            
+            current_occupancy = actual_occ_row[current_month_idx] if current_month_idx is not None else 0
+            projected_occupancy = budgeted_occ_row[next_month_idx] if next_month_idx is not None else 0
+            
+            current_distributions = distributions_row[current_month_idx] if current_month_idx is not None else 0
+            
+            # Convert to float, handle potential non-numeric values
+            current_fcf = float(current_fcf) if pd.notna(current_fcf) else 0.0
+            projected_fcf = float(projected_fcf) if pd.notna(projected_fcf) else 0.0
+            current_occupancy = float(current_occupancy) * 100 if pd.notna(current_occupancy) else 0.0
+            projected_occupancy = float(projected_occupancy) * 100 if pd.notna(projected_occupancy) else 0.0
+            current_distributions = float(current_distributions) if pd.notna(current_distributions) else 0.0
             
             return {
-                'status': 'parsed',
-                'file_path': file_path,
-                'row_count': len(df) if df is not None else 0,
-                'columns': df.columns.tolist() if df is not None else [],
-                'current_month': None,  # TBD: Extract from file
-                'recommendation': {
-                    'type': None,  # 'distribution', 'contribution', or 'none'
-                    'amount': None,
-                    'month': None
-                },
-                'occupancy_data': {
-                    'historical': [],  # Past months actuals
-                    'projected': []    # Future months forecasts
-                },
-                'note': 'Placeholder - waiting for sample file structure'
+                'status': 'success',
+                'property_name': property_name,
+                'entity_number': entity_number,
+                'current_month': current_month_name,
+                'projected_month': projected_month_name,
+                'current_fcf': current_fcf,
+                'projected_fcf': projected_fcf,
+                'current_occupancy': current_occupancy,
+                'projected_occupancy': projected_occupancy,
+                'current_distributions': current_distributions,
+                'file_path': file_path
             }
             
         except Exception as e:
@@ -100,76 +176,258 @@ class FileProcessor:
                 'file_path': file_path
             }
     
-    def _parse_gl_export(self, file_path: str) -> Dict[str, Any]:
+    def parse_income_statement(self, file_path: str) -> Dict[str, Any]:
         """
-        Parse the GL export file
-        
-        Format TBD - waiting for sample
+        Parse PDF income statement
+        Extracts: Total Operating Income, Total Operating Expenses, NOI (month and YTD)
         """
-        logger.info(f"Parsing GL export: {file_path}")
+        logger.info(f"Parsing income statement: {file_path}")
         
         try:
-            # Try to read as Excel first, fall back to CSV
-            try:
-                df = pd.read_excel(file_path)
-            except:
-                df = pd.read_csv(file_path)
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                all_text = ''.join([page.extract_text() for page in pdf_reader.pages])
             
-            return {
-                'status': 'parsed',
-                'file_path': file_path,
-                'row_count': len(df) if df is not None else 0,
-                'note': 'Placeholder - waiting for sample file structure'
+            # Extract key line items
+            line_items = {
+                'Total Operating Income': self._extract_financial_line(all_text, 'Total Operating Income'),
+                'Total Operating Expenses': self._extract_financial_line(all_text, 'Total Operating Expenses'),
+                'NET OPERATING INCOME': self._extract_financial_line(all_text, 'NET OPERATING INCOME'),
             }
             
+            # Parse into structured data
+            result = {'status': 'success', 'file_path': file_path}
+            
+            if line_items['Total Operating Income']:
+                data = line_items['Total Operating Income']
+                result['income_month_actual'] = self._clean_number(data['month_actual'])
+                result['income_month_budget'] = self._clean_number(data['month_budget'])
+                result['income_month_variance_pct'] = self._clean_number(data['month_variance_%'].replace('%', ''))
+                result['income_ytd_actual'] = self._clean_number(data['ytd_actual'])
+                result['income_ytd_budget'] = self._clean_number(data['ytd_budget'])
+                result['income_ytd_variance_pct'] = self._clean_number(data['ytd_variance_%'].replace('%', ''))
+            
+            if line_items['Total Operating Expenses']:
+                data = line_items['Total Operating Expenses']
+                result['expenses_month_actual'] = self._clean_number(data['month_actual'])
+                result['expenses_month_budget'] = self._clean_number(data['month_budget'])
+                result['expenses_month_variance_pct'] = self._clean_number(data['month_variance_%'].replace('%', ''))
+                result['expenses_ytd_actual'] = self._clean_number(data['ytd_actual'])
+                result['expenses_ytd_budget'] = self._clean_number(data['ytd_budget'])
+                result['expenses_ytd_variance_pct'] = self._clean_number(data['ytd_variance_%'].replace('%', ''))
+            
+            if line_items['NET OPERATING INCOME']:
+                data = line_items['NET OPERATING INCOME']
+                result['noi_month_actual'] = self._clean_number(data['month_actual'])
+                result['noi_month_budget'] = self._clean_number(data['month_budget'])
+                result['noi_month_variance_pct'] = self._clean_number(data['month_variance_%'].replace('%', ''))
+                result['noi_ytd_actual'] = self._clean_number(data['ytd_actual'])
+                result['noi_ytd_budget'] = self._clean_number(data['ytd_budget'])
+                result['noi_ytd_variance_pct'] = self._clean_number(data['ytd_variance_%'].replace('%', ''))
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Error parsing GL export: {str(e)}")
+            logger.error(f"Error parsing income statement: {str(e)}")
             return {
                 'status': 'error',
                 'error': str(e),
                 'file_path': file_path
             }
     
-    def _parse_analysis_file(self, file_path: str) -> Dict[str, Any]:
+    def parse_balance_sheet(self, file_path: str) -> Dict[str, Any]:
         """
-        Parse the additional analysis file
-        
-        Format and contents TBD - mystery file
+        Parse PDF balance sheet
+        Extracts: Cash, Current Assets/Liabilities, Debt, Working Capital
         """
-        logger.info(f"Parsing analysis file: {file_path}")
+        logger.info(f"Parsing balance sheet: {file_path}")
         
         try:
-            # Try to read as Excel first, fall back to CSV
-            try:
-                df = pd.read_excel(file_path)
-            except:
-                df = pd.read_csv(file_path)
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                all_text = ''.join([page.extract_text() for page in pdf_reader.pages])
             
-            return {
-                'status': 'parsed',
-                'file_path': file_path,
-                'row_count': len(df) if df is not None else 0,
-                'note': 'Placeholder - waiting for sample file structure'
+            # Extract key items using regex
+            patterns = {
+                'Total Cash and Cash Equivalents': r'Total Cash and Cash Equivalents\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Total Accounts Receivable': r'Total Accounts Receivable\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Total Current Liabilities': r'Total Current Liabilities\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Total Notes Payable': r'Total Notes Payable\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Accrued Interest': r'Accrued Interest\s+([\d,.-]+)\s+([\d,.-]+)',
             }
             
+            result = {'status': 'success', 'file_path': file_path}
+            
+            for label, pattern in patterns.items():
+                match = re.search(pattern, all_text)
+                if match:
+                    current_val = self._clean_number(match.group(1))
+                    prior_val = self._clean_number(match.group(2))
+                    
+                    if label == 'Total Cash and Cash Equivalents':
+                        result['cash_balance'] = current_val
+                        result['cash_prior_month'] = prior_val
+                    elif label == 'Total Accounts Receivable':
+                        result['accounts_receivable'] = current_val
+                    elif label == 'Total Current Liabilities':
+                        result['current_liabilities'] = current_val
+                    elif label == 'Total Notes Payable':
+                        result['total_debt'] = current_val
+                        result['monthly_principal'] = abs(current_val - prior_val)
+                    elif label == 'Accrued Interest':
+                        result['accrued_interest'] = current_val
+            
+            # Calculate monthly debt service (principal + interest estimate)
+            if 'monthly_principal' in result and 'accrued_interest' in result:
+                # Rough estimate: interest change month-over-month
+                result['monthly_debt_service'] = result['monthly_principal'] + (result['monthly_principal'] * 0.1)
+            
+            # Calculate months of reserves
+            if 'cash_balance' in result and 'monthly_debt_service' in result and 'current_liabilities' in result:
+                monthly_needs = result['monthly_debt_service'] + (result['current_liabilities'] * 0.1)
+                result['months_of_reserves'] = result['cash_balance'] / monthly_needs if monthly_needs > 0 else 999
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Error parsing analysis file: {str(e)}")
+            logger.error(f"Error parsing balance sheet: {str(e)}")
             return {
                 'status': 'error',
                 'error': str(e),
                 'file_path': file_path
             }
     
-    def extract_occupancy_assumptions(self, cash_data: Dict[str, Any]) -> Dict[str, Any]:
+    def get_economic_context(self, property_name: str, university: str, city: str, 
+                            state: str, zip_code: str, current_month: str) -> Dict[str, Any]:
         """
-        Extract occupancy assumptions from cash forecast data
+        Get economic and market context using OpenAI API
+        """
+        logger.info(f"Getting economic context for {property_name}")
         
-        This is critical for validation - accountant's revenue projections
-        are driven by expected occupancy rates
+        try:
+            # Get full economic analysis
+            analysis_result = self.economic_analyzer.analyze_property_context(
+                property_name=property_name,
+                university=university,
+                city=city,
+                state=state,
+                zip_code=zip_code,
+                current_month=current_month
+            )
+            
+            # Get seasonal factor
+            month_name = current_month.split()[0] if ' ' in current_month else current_month
+            seasonal_factor = self.economic_analyzer.get_seasonal_factor(month_name)
+            
+            # Determine enrollment trend from analysis text
+            enrollment_trend = 'stable'
+            if analysis_result.get('success'):
+                analysis_text = analysis_result.get('analysis', '').lower()
+                if 'growing' in analysis_text or 'growth' in analysis_text or 'increasing' in analysis_text:
+                    enrollment_trend = 'growing'
+                elif 'declining' in analysis_text or 'decrease' in analysis_text or 'falling' in analysis_text:
+                    enrollment_trend = 'declining'
+            
+            # Check for new supply mentions
+            new_supply = False
+            if analysis_result.get('success'):
+                analysis_text = analysis_result.get('analysis', '').lower()
+                if 'new' in analysis_text and ('construction' in analysis_text or 'development' in analysis_text or 'supply' in analysis_text):
+                    new_supply = True
+            
+            return {
+                'success': analysis_result.get('success', False),
+                'seasonal_factor': seasonal_factor,
+                'enrollment_trend': enrollment_trend,
+                'new_supply': new_supply,
+                'full_analysis': analysis_result.get('analysis', ''),
+                'tokens_used': analysis_result.get('tokens_used', 0)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting economic context: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'seasonal_factor': {'season': 'Unknown', 'expected_occupancy': 'Unknown', 'cash_flow_pattern': 'Unknown'},
+                'enrollment_trend': 'unknown',
+                'new_supply': False,
+                'full_analysis': ''
+            }
+    
+    # Helper methods
+    
+    def _parse_cash_forecast_filename(self, filename: str) -> Tuple[str, str, str]:
         """
-        # TODO: Implement once we know the file structure
-        return {
-            'historical_occupancy': [],
-            'projected_occupancy': [],
-            'basis': 'TBD'
-        }
+        Parse filename - flexible to handle various formats
+        Examples:
+          - "550 Rittenhouse Station Cash Forecast - 09.2025.xlsx"
+          - "550 Rittenhouse Cash Forecast - 09.2025.xlsx"
+          - "Cash Forecast - 09.2025.xlsx"
+        Returns: (entity_number, property_name, current_month)
+        """
+        # Try standard format: "### PropertyName Cash Forecast - MM.YYYY"
+        match = re.match(r'(\d+)\s+(.+?)\s+Cash Forecast\s+-\s+(\d{2})\.(\d{4})', filename, re.IGNORECASE)
+        if match:
+            entity_number = match.group(1)
+            property_name = match.group(2).strip()
+            month = match.group(3)
+            year = match.group(4)
+            
+            month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                          'July', 'August', 'September', 'October', 'November', 'December']
+            month_name = month_names[int(month)] if int(month) <= 12 else 'Unknown'
+            
+            current_month = f"{month_name} {year}"
+            
+            return entity_number, property_name, current_month
+        
+        # Try alternate format: just extract entity number and month if present
+        entity_match = re.search(r'^(\d+)', filename)
+        date_match = re.search(r'(\d{2})\.(\d{4})', filename)
+        
+        entity_number = entity_match.group(1) if entity_match else 'Unknown'
+        
+        if date_match:
+            month = date_match.group(1)
+            year = date_match.group(2)
+            month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                          'July', 'August', 'September', 'October', 'November', 'December']
+            month_name = month_names[int(month)] if int(month) <= 12 else 'Unknown'
+            current_month = f"{month_name} {year}"
+        else:
+            current_month = 'Unknown'
+        
+        # Property name will be overridden by database lookup in process_and_analyze
+        return entity_number, 'From Database', current_month
+    
+    def _extract_financial_line(self, text: str, label: str) -> Optional[Dict[str, str]]:
+        """Extract a financial line item with month and YTD data"""
+        pattern = rf'{re.escape(label)}\s+([\d,.-]+(?:\(\))?)\s+([\d,.-]+(?:\(\))?)\s+\(?([\d,.-]+)\)?\s+([-\d.]+%)\s+([\d,.-]+(?:\(\))?)\s+([\d,.-]+(?:\(\))?)\s+\(?([\d,.-]+)\)?\s+([-\d.]+%)'
+        
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return {
+                'month_actual': match.group(1),
+                'month_budget': match.group(2),
+                'month_variance_$': match.group(3),
+                'month_variance_%': match.group(4),
+                'ytd_actual': match.group(5),
+                'ytd_budget': match.group(6),
+                'ytd_variance_$': match.group(7),
+                'ytd_variance_%': match.group(8),
+            }
+        return None
+    
+    def _clean_number(self, s) -> float:
+        """Convert string like '425,818.20' or '(1,234.56)' to float"""
+        if not isinstance(s, str):
+            return float(s) if pd.notna(s) else 0.0
+        
+        s = s.replace(',', '').replace('$', '').strip()
+        if s.startswith('(') and s.endswith(')'):
+            return -float(s[1:-1])
+        try:
+            return float(s)
+        except:
+            return 0.0

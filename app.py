@@ -3,7 +3,7 @@ Cash Forecast Analyzer - Main Flask Application
 Analyzes student housing property cash forecasts and validates accountant recommendations
 """
 
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, send_file
 from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
@@ -12,12 +12,13 @@ import uuid
 from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
 from services.summary_generator import SummaryGenerator
+from services.pptx_generator import PowerPointGenerator
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv', 'txt'}
+app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv', 'txt', 'pdf'}
 
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -134,10 +135,192 @@ def get_drill_down(analysis_id, bullet_id):
         'details': 'Detailed analysis will appear here'
     })
 
+@app.route('/api/analyze', methods=['POST'])
+def analyze_files():
+    """
+    Process uploaded files and generate comprehensive recommendation
+    Requires: cash_forecast (Excel), income_statement (PDF), balance_sheet (PDF)
+    """
+    try:
+        # Validate files
+        required_files = ['cash_forecast', 'income_statement', 'balance_sheet']
+        for file_key in required_files:
+            if file_key not in request.files:
+                return jsonify({'error': f'{file_key} file is required'}), 400
+            if request.files[file_key].filename == '':
+                return jsonify({'error': f'Please select a {file_key} file'}), 400
+        
+        # Get files
+        cash_forecast = request.files['cash_forecast']
+        income_statement = request.files['income_statement']
+        balance_sheet = request.files['balance_sheet']
+        
+        # Validate property information
+        property_entity = request.form.get('property_name', '').strip()
+        property_address = request.form.get('property_address', '').strip()
+        zip_code = request.form.get('zip_code', '').strip()
+        university = request.form.get('university', '').strip()
+        
+        if not all([property_entity, property_address, zip_code, university]):
+            return jsonify({'error': 'All property information fields are required'}), 400
+        
+        # Validate file types
+        if not cash_forecast.filename.endswith(('.xlsx', '.xls')):
+            return jsonify({'error': 'Cash forecast must be an Excel file (.xlsx or .xls)'}), 400
+        
+        if not income_statement.filename.endswith('.pdf') or not balance_sheet.filename.endswith('.pdf'):
+            return jsonify({'error': 'Income statement and balance sheet must be PDF files'}), 400
+        
+        # Create unique session folder
+        analysis_id = str(uuid.uuid4())
+        session_folder = os.path.join(app.config['UPLOAD_FOLDER'], analysis_id)
+        os.makedirs(session_folder, exist_ok=True)
+        
+        # Save files
+        cash_forecast_path = os.path.join(session_folder, secure_filename(cash_forecast.filename))
+        income_statement_path = os.path.join(session_folder, secure_filename(income_statement.filename))
+        balance_sheet_path = os.path.join(session_folder, secure_filename(balance_sheet.filename))
+        
+        cash_forecast.save(cash_forecast_path)
+        income_statement.save(income_statement_path)
+        balance_sheet.save(balance_sheet_path)
+        
+        # Get property details from database
+        from services.database import PropertyDatabase
+        db = PropertyDatabase()
+        db_property = db.get_property_info(property_entity)
+        
+        # Build property info - use 'name' for internal processing, it gets mapped to property_name
+        property_info = {
+            'entity_number': property_entity,
+            'name': db_property.get('property_name', property_entity) if db_property else property_entity,
+            'address': property_address,
+            'city': db_property.get('city', 'Unknown') if db_property else 'Unknown',
+            'state': db_property.get('state', 'Unknown') if db_property else 'Unknown',
+            'zip': zip_code,
+            'university': university,
+            'analysis_date': datetime.now().isoformat()
+        }
+        
+        # Process files and generate recommendation
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            return jsonify({'error': 'OpenAI API key not configured'}), 500
+        
+        file_processor = FileProcessor(openai_api_key=openai_api_key)
+        result = file_processor.process_and_analyze(
+            cash_forecast_path=cash_forecast_path,
+            income_statement_path=income_statement_path,
+            balance_sheet_path=balance_sheet_path,
+            property_info=property_info
+        )
+        
+        if not result.get('success'):
+            return jsonify({'error': result.get('error', 'Analysis failed')}), 500
+        
+        # Generate PowerPoint presentation
+        pptx_filename = f"{property_entity}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+        pptx_path = os.path.join(session_folder, pptx_filename)
+        pptx_available = False
+        
+        try:
+            pptx_generator = PowerPointGenerator()
+            pptx_generator.generate_presentation(result['recommendation'], pptx_path)
+            # Store pptx path in session for download
+            session['last_pptx_path'] = pptx_path
+            session['last_pptx_filename'] = pptx_filename
+            pptx_available = True
+        except Exception as pptx_error:
+            app.logger.error(f"PowerPoint generation failed: {str(pptx_error)}")
+            # Continue even if PowerPoint fails
+        
+        # Render results page
+        return render_template('results.html', 
+                             recommendation=result['recommendation'],
+                             pptx_available=pptx_available)
+        
+    except Exception as e:
+        app.logger.error(f"Error in analysis: {str(e)}")
+        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+
+@app.route('/download-pptx')
+def download_pptx():
+    """Download the generated PowerPoint presentation"""
+    try:
+        pptx_path = session.get('last_pptx_path')
+        pptx_filename = session.get('last_pptx_filename', 'analysis.pptx')
+        
+        if not pptx_path or not os.path.exists(pptx_path):
+            return jsonify({'error': 'PowerPoint file not found'}), 404
+        
+        return send_file(
+            pptx_path,
+            as_attachment=True,
+            download_name=pptx_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        )
+    except Exception as e:
+        app.logger.error(f"Error downloading PowerPoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/health')
 def health_check():
     """Health check endpoint for Azure"""
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
+@app.route('/test-db')
+def test_database():
+    """Test database connection and query"""
+    try:
+        from services.database import PropertyDatabase
+        db = PropertyDatabase()
+        
+        # Test connection
+        if not db.test_connection():
+            return jsonify({'error': 'Database connection failed'}), 500
+        
+        # Try to list properties (will show first 5)
+        properties = db.list_all_properties()[:5]
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Database connection successful',
+            'total_properties': len(properties),
+            'sample_properties': properties
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Database test error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/properties')
+def get_properties():
+    """Get list of all reportable properties for dropdown"""
+    try:
+        from services.database import PropertyDatabase
+        db = PropertyDatabase()
+        properties = db.list_all_properties()
+        return jsonify(properties)
+    except Exception as e:
+        app.logger.error(f"Error fetching properties: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/property/<int:entity_number>')
+def get_property_details(entity_number):
+    """Get detailed property information by entity number"""
+    try:
+        from services.database import PropertyDatabase
+        db = PropertyDatabase()
+        property_info = db.get_property_info(str(entity_number))
+        if property_info:
+            return jsonify(property_info)
+        else:
+            return jsonify({'error': 'Property not found'}), 404
+    except Exception as e:
+        app.logger.error(f"Error fetching property details: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Use use_reloader=False to avoid file watcher issues on Windows
+    # Or manually restart the app when making changes
+    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

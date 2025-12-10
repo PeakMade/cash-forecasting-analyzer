@@ -111,6 +111,30 @@
         color: #777;
         margin-top: 5px;
     }
+    
+    .error-text {
+        font-size: 0.9rem;
+        color: #dc3545;
+        margin-top: 5px;
+        font-weight: 600;
+    }
+    
+    .file-upload.has-error {
+        border-color: #dc3545;
+        background: #fff5f5;
+    }
+    
+    .two-column-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+    }
+    
+    @media (max-width: 768px) {
+        .two-column-grid {
+            grid-template-columns: 1fr;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -124,25 +148,30 @@
     <form id="analysisForm" enctype="multipart/form-data">
         <div class="section-title">Property Information</div>
         
-        <div class="form-group">
-            <label for="property_name">Property Name *</label>
-            <input type="text" id="property_name" name="property_name" required placeholder="e.g., Campus View Apartments">
-        </div>
-        
-        <div class="form-group">
-            <label for="property_address">Property Address *</label>
-            <input type="text" id="property_address" name="property_address" required placeholder="e.g., 123 University Blvd, College Town, ST">
-        </div>
-        
-        <div class="form-group">
-            <label for="zip_code">ZIP Code *</label>
-            <input type="text" id="zip_code" name="zip_code" required pattern="[0-9]{5}(-[0-9]{4})?" placeholder="e.g., 12345 or 12345-6789">
-            <div class="help-text">5-digit or ZIP+4 format</div>
-        </div>
-        
-        <div class="form-group">
-            <label for="university">Associated University *</label>
-            <input type="text" id="university" name="university" required placeholder="e.g., State University">
+        <div class="two-column-grid">
+            <div class="form-group">
+                <label for="property_name">Property Name <span style="color: red;">*</span></label>
+                <select id="property_name" name="property_name" required style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 5px; font-size: 1rem;">
+                    <option value="">-- Select a Property --</option>
+                </select>
+                <div class="help-text" id="loading-properties">Loading properties...</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="property_address">Property Address <span style="color: red;">*</span></label>
+                <input type="text" id="property_address" name="property_address" required placeholder="e.g., 123 University Blvd, College Town, ST">
+            </div>
+            
+            <div class="form-group">
+                <label for="zip_code">ZIP Code <span style="color: red;">*</span></label>
+                <input type="text" id="zip_code" name="zip_code" required pattern="[0-9]{5}(-[0-9]{4})?" placeholder="e.g., 12345 or 12345-6789">
+                <div class="help-text">5-digit or ZIP+4 format</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="university">Associated University <span style="color: red;">*</span></label>
+                <input type="text" id="university" name="university" required placeholder="e.g., State University">
+            </div>
         </div>
         
         <div class="section-title">Required Files</div>
@@ -152,29 +181,35 @@
             <div class="file-upload" id="cash_forecast_zone">
                 <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
                 <p>📊 Click to upload or drag file here</p>
-                <div class="help-text">Excel file with actuals and budget projections</div>
+                <div class="help-text">Excel file containing "Cash Forecast" in the filename</div>
+                <div class="error-text" id="cash_forecast_error" style="display:none;"></div>
             </div>
         </div>
         
         <div class="form-group">
-            <label for="gl_export">GL Export File *</label>
-            <div class="file-upload" id="gl_export_zone">
-                <input type="file" id="gl_export" name="gl_export" required accept=".xlsx,.xls,.csv">
-                <p>📋 Click to upload or drag file here</p>
-                <div class="help-text">General ledger export</div>
+            <label for="income_statement">Comparative Income Statement (PDF) *</label>
+            <div class="file-upload" id="income_statement_zone">
+                <input type="file" id="income_statement" name="income_statement" required accept=".pdf">
+                <p>📋 Click to upload or drag PDF file here</p>
+                <div class="help-text">PDF containing "Comparative Income Statement" in the filename</div>
+                <div class="error-text" id="income_statement_error" style="display:none;"></div>
             </div>
         </div>
         
         <div class="form-group">
-            <label for="analysis_file">Additional Analysis File *</label>
-            <div class="file-upload" id="analysis_file_zone">
-                <input type="file" id="analysis_file" name="analysis_file" required accept=".xlsx,.xls,.csv">
-                <p>📈 Click to upload or drag file here</p>
-                <div class="help-text">Supplemental analysis data</div>
+            <label for="balance_sheet">Balance Sheet (PDF) *</label>
+            <div class="file-upload" id="balance_sheet_zone">
+                <input type="file" id="balance_sheet" name="balance_sheet" required accept=".pdf">
+                <p>📈 Click to upload or drag PDF file here</p>
+                <div class="help-text">PDF containing "Balance Sheet" in the filename</div>
+                <div class="error-text" id="balance_sheet_error" style="display:none;"></div>
             </div>
         </div>
         
         <button type="submit" class="btn">Analyze Cash Forecast</button>
+        <div style="text-align: center; margin-top: 10px; font-size: 0.75rem; color: #999;">
+            Powered by OpenAI GPT-4o
+        </div>
     </form>
 </div>
 
@@ -194,8 +229,100 @@
 
 {% block scripts %}
 <script>
+// Load properties on page load
+window.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const response = await fetch('/api/properties');
+        const properties = await response.json();
+        
+        const select = document.getElementById('property_name');
+        const loadingText = document.getElementById('loading-properties');
+        
+        if (response.ok && Array.isArray(properties)) {
+            properties.forEach(prop => {
+                const option = document.createElement('option');
+                option.value = prop.entity_number;
+                option.textContent = prop.property_name;
+                select.appendChild(option);
+            });
+            loadingText.textContent = `${properties.length} properties available`;
+            loadingText.style.color = '#28a745';
+        } else {
+            loadingText.textContent = 'Error loading properties';
+            loadingText.style.color = '#dc3545';
+        }
+    } catch (error) {
+        console.error('Error loading properties:', error);
+        document.getElementById('loading-properties').textContent = 'Error loading properties';
+    }
+});
+
+// Auto-populate form fields when property is selected
+document.getElementById('property_name').addEventListener('change', async function() {
+    const entityNumber = this.value;
+    
+    if (!entityNumber) {
+        // Clear fields if no property selected
+        document.getElementById('property_address').value = '';
+        document.getElementById('zip_code').value = '';
+        document.getElementById('university').value = '';
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/property/${entityNumber}`);
+        const data = await response.json();
+        
+        if (response.ok && !data.error) {
+            // Populate form fields
+            document.getElementById('property_address').value = data.address || '';
+            document.getElementById('zip_code').value = data.zip_code || '';
+            document.getElementById('university').value = data.university || '';
+        } else {
+            console.error('Error fetching property details:', data.error);
+        }
+    } catch (error) {
+        console.error('Error loading property details:', error);
+    }
+});
+
+// File validation patterns (case-insensitive, handles spaces and underscores)
+const fileValidation = {
+    cash_forecast: {
+        pattern: /cash[\s_]*forecast/i,
+        message: 'Filename must contain "Cash Forecast" (with spaces or underscores)'
+    },
+    income_statement: {
+        pattern: /comparative[\s_]*income[\s_]*statement/i,
+        message: 'Filename must contain "Comparative Income Statement"'
+    },
+    balance_sheet: {
+        pattern: /balance[\s_]*sheet/i,
+        message: 'Filename must contain "Balance Sheet"'
+    }
+};
+
+function validateFile(fileId, filename) {
+    const validation = fileValidation[fileId];
+    const errorElement = document.getElementById(fileId + '_error');
+    const zone = document.getElementById(fileId + '_zone');
+    
+    if (!validation.pattern.test(filename)) {
+        errorElement.textContent = '⚠ ' + validation.message;
+        errorElement.style.display = 'block';
+        zone.classList.add('has-error');
+        zone.classList.remove('has-file');
+        return false;
+    } else {
+        errorElement.style.display = 'none';
+        zone.classList.remove('has-error');
+        zone.classList.add('has-file');
+        return true;
+    }
+}
+
 // File upload handling
-['cash_forecast', 'gl_export', 'analysis_file'].forEach(fileId => {
+['cash_forecast', 'income_statement', 'balance_sheet'].forEach(fileId => {
     const input = document.getElementById(fileId);
     const zone = document.getElementById(fileId + '_zone');
     
@@ -203,8 +330,14 @@
     
     input.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
-            zone.classList.add('has-file');
-            zone.querySelector('p').textContent = '✓ ' + e.target.files[0].name;
+            const file = e.target.files[0];
+            const isValid = validateFile(fileId, file.name);
+            
+            if (isValid) {
+                zone.querySelector('p').textContent = '✓ ' + file.name;
+            } else {
+                zone.querySelector('p').textContent = '✗ ' + file.name;
+            }
         }
     });
     
@@ -222,9 +355,15 @@
         e.preventDefault();
         zone.style.borderColor = '';
         if (e.dataTransfer.files.length > 0) {
+            const file = e.dataTransfer.files[0];
             input.files = e.dataTransfer.files;
-            zone.classList.add('has-file');
-            zone.querySelector('p').textContent = '✓ ' + e.dataTransfer.files[0].name;
+            const isValid = validateFile(fileId, file.name);
+            
+            if (isValid) {
+                zone.querySelector('p').textContent = '✓ ' + file.name;
+            } else {
+                zone.querySelector('p').textContent = '✗ ' + file.name;
+            }
         }
     });
 });
@@ -233,6 +372,30 @@
 document.getElementById('analysisForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     
+    // Validate all files before submission
+    const cashForecastFile = document.getElementById('cash_forecast').files[0];
+    const incomeStatementFile = document.getElementById('income_statement').files[0];
+    const balanceSheetFile = document.getElementById('balance_sheet').files[0];
+    
+    let hasErrors = false;
+    
+    if (!cashForecastFile || !validateFile('cash_forecast', cashForecastFile.name)) {
+        hasErrors = true;
+    }
+    
+    if (!incomeStatementFile || !validateFile('income_statement', incomeStatementFile.name)) {
+        hasErrors = true;
+    }
+    
+    if (!balanceSheetFile || !validateFile('balance_sheet', balanceSheetFile.name)) {
+        hasErrors = true;
+    }
+    
+    if (hasErrors) {
+        showError('Please ensure all files have the correct names before submitting.');
+        return;
+    }
+    
     const formData = new FormData(e.target);
     
     // Show loading, hide form
@@ -240,17 +403,25 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
     document.getElementById('loading').classList.add('active');
     
     try {
-        const response = await fetch('/upload', {
+        const response = await fetch('/api/analyze', {
             method: 'POST',
             body: formData
         });
         
-        const result = await response.json();
-        
         if (response.ok) {
-            displayResults(result);
+            // The endpoint returns HTML, so display it
+            const html = await response.text();
+            document.open();
+            document.write(html);
+            document.close();
         } else {
-            showError(result.error || 'An error occurred during analysis');
+            // Try to parse error as JSON
+            try {
+                const result = await response.json();
+                showError(result.error || 'An error occurred during analysis');
+            } catch {
+                showError('An error occurred during analysis');
+            }
         }
     } catch (error) {
         showError('Network error: ' + error.message);
