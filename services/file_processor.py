@@ -123,14 +123,14 @@ class FileProcessor:
             distributions_row = df.iloc[47, year_2025_cols].tolist() if len(df) > 47 else []
             fcf_row = df.iloc[48, year_2025_cols].tolist() if len(df) > 48 else []
             
-            # Find current month (most recent "Actual") and next month (first "Budget")
+            # Find current month (most recent "Actual" = LAST actual column) and next month (first "Budget")
             current_month_idx = None
             next_month_idx = None
             
             for i, status in enumerate(status_row):
                 if isinstance(status, str):
-                    if 'actual' in status.lower() and current_month_idx is None:
-                        current_month_idx = i
+                    if 'actual' in status.lower():
+                        current_month_idx = i  # Keep updating to get the LAST actual month
                     elif 'budget' in status.lower() and current_month_idx is not None and next_month_idx is None:
                         next_month_idx = i
                         break
@@ -316,8 +316,27 @@ class FileProcessor:
             )
             
             # Get seasonal factor
-            month_name = current_month.split()[0] if ' ' in current_month else current_month
+            # Handle different month formats: "September 2025", "Jan-2025", "September"
+            if '-' in current_month:
+                # Format like "Jan-2025" or "Sept-2025" - extract month abbreviation
+                month_abbr = current_month.split('-')[0].strip()
+                # Convert abbreviation to full name
+                month_map = {
+                    'jan': 'January', 'feb': 'February', 'mar': 'March', 'apr': 'April',
+                    'may': 'May', 'jun': 'June', 'jul': 'July', 'aug': 'August',
+                    'sep': 'September', 'sept': 'September',  # Handle both Sep and Sept
+                    'oct': 'October', 'nov': 'November', 'dec': 'December'
+                }
+                month_name = month_map.get(month_abbr.lower(), month_abbr)
+            elif ' ' in current_month:
+                # Format like "September 2025" - extract first word
+                month_name = current_month.split()[0]
+            else:
+                month_name = current_month
+                
+            print(f"DEBUG: Extracting month for seasonal factor: '{month_name}' from '{current_month}'")
             seasonal_factor = self.economic_analyzer.get_seasonal_factor(month_name)
+            print(f"DEBUG: Seasonal factor result: {seasonal_factor}")
             
             # Determine enrollment trend from analysis text
             enrollment_trend = 'stable'
@@ -366,8 +385,13 @@ class FileProcessor:
           - "Cash Forecast - 09.2025.xlsx"
         Returns: (entity_number, property_name, current_month)
         """
+        print(f"DEBUG: Parsing filename: '{filename}'")
+        
+        # Normalize underscores to spaces (Windows may convert spaces to underscores)
+        filename = filename.replace('_', ' ')
+        
         # Try standard format: "### PropertyName Cash Forecast - MM.YYYY"
-        match = re.match(r'(\d+)\s+(.+?)\s+Cash Forecast\s+-\s+(\d{2})\.(\d{4})', filename, re.IGNORECASE)
+        match = re.match(r'(\d+)\s+(.+?)\s+Cash\s+Forecast\s+-\s+(\d{2})\.(\d{4})', filename, re.IGNORECASE)
         if match:
             entity_number = match.group(1)
             property_name = match.group(2).strip()
@@ -380,7 +404,10 @@ class FileProcessor:
             
             current_month = f"{month_name} {year}"
             
+            print(f"DEBUG: PRIMARY match succeeded -> Entity: {entity_number}, Property: {property_name}, Month: {current_month}")
             return entity_number, property_name, current_month
+        
+        print(f"DEBUG: Primary regex failed, trying fallback...")
         
         # Try alternate format: just extract entity number and month if present
         entity_match = re.search(r'^(\d+)', filename)
@@ -395,8 +422,10 @@ class FileProcessor:
                           'July', 'August', 'September', 'October', 'November', 'December']
             month_name = month_names[int(month)] if int(month) <= 12 else 'Unknown'
             current_month = f"{month_name} {year}"
+            print(f"DEBUG: Fallback parsing -> Entity: {entity_number}, Month: {current_month}")
         else:
             current_month = 'Unknown'
+            print(f"DEBUG: Could not parse month from filename: {filename}")
         
         # Property name will be overridden by database lookup in process_and_analyze
         return entity_number, 'From Database', current_month

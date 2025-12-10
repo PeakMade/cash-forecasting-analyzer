@@ -46,18 +46,14 @@ class PropertyDatabase:
             
             driver = available_drivers[0]
             
-            # Build connection string - compatible with older drivers
-            # Using semicolon-separated format that works with SQL Server authentication
-            connection_params = {
-                'DRIVER': driver,
-                'SERVER': self.server,
-                'DATABASE': self.database,
-                'UID': self.username,
-                'PWD': self.password,
-            }
-            
-            # Build connection string manually to ensure proper formatting
-            connection_string = ';'.join([f'{k}={v}' for k, v in connection_params.items()]) + ';'
+            # Build connection string - back to original working format from this morning
+            connection_string = (
+                f"DRIVER={{{driver}}};"
+                f"SERVER={self.server};"
+                f"DATABASE={self.database};"
+                f"UID={self.username};"
+                f"PWD={self.password};"
+            )
             
             connection = pyodbc.connect(connection_string, timeout=30)
             logger.debug(f"Connected to SQL Server: {self.server}/{self.database}")

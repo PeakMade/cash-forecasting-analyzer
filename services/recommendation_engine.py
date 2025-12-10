@@ -226,8 +226,15 @@ class RecommendationEngine:
             bullets.append(f"Operating expenses tracking close to budget ({expenses_ytd_variance_pct:+.1f}% YTD)")
         
         # Bullet 6: Market/seasonal context
-        season_desc = seasonal_factor.get('season', 'Unknown period')
-        expected_occ = seasonal_factor.get('expected_occupancy', 'Unknown')
+        season_desc = seasonal_factor.get('season', 'Current period')
+        expected_occ = seasonal_factor.get('expected_occupancy', 'Normal')
+        
+        # Clean up "Unable to determine" and "Unknown" values
+        if expected_occ in ['Unable to determine', 'Unknown']:
+            expected_occ = 'typical'
+        if season_desc == 'Unknown':
+            season_desc = 'Current period'
+            
         if enrollment_trend == 'growing':
             bullets.append(f"Market fundamentals are favorable: {season_desc} with {expected_occ} occupancy expected, supported by growing university enrollment")
         elif enrollment_trend == 'declining':

@@ -31,7 +31,8 @@ def allowed_file(filename):
 @app.route('/')
 def index():
     """Main page with file upload form"""
-    return render_template('index.html')
+    model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
+    return render_template('index.html', model_name=model_name)
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
