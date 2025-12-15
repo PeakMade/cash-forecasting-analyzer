@@ -31,11 +31,9 @@ class AzureADAuth:
         self.redirect_uri = os.environ.get('AZURE_AD_REDIRECT_URI', 
                                           'http://localhost:5000/auth/callback')
         
-        # Scopes for accessing SharePoint and user info
-        self.scopes = [
-            "https://graph.microsoft.com/User.Read",
-            "https://peakcampus.sharepoint.com/AllSites.Read"
-        ]
+        # Initial scopes - just request User.Read for login
+        # SharePoint token will be acquired separately when needed
+        self.scopes = ["User.Read", "openid", "profile", "offline_access"]
     
     def get_msal_app(self):
         """Create MSAL confidential client application"""
@@ -111,19 +109,21 @@ class AzureADAuth:
     
     def get_sharepoint_token(self):
         """
-        Get SharePoint-specific access token
+        Get SharePoint-specific access token using on-behalf-of flow
         
         Returns:
             Access token for SharePoint API
         """
         accounts = session.get('accounts', [])
         if not accounts:
+            logger.warning("No accounts in session for SharePoint token")
             return None
         
         msal_app = self.get_msal_app()
         
-        # Request SharePoint-specific token
-        sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
+        # Request SharePoint-specific token with User.Read scope
+        # Using AllSites.Read delegated permission
+        sharepoint_scopes = ["https://peakcampus.sharepoint.com/AllSites.Read"]
         
         result = msal_app.acquire_token_silent(
             scopes=sharepoint_scopes,
