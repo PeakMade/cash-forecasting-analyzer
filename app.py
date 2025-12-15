@@ -12,7 +12,7 @@ import uuid
 from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
 from services.summary_generator import SummaryGenerator
-from services.pptx_generator import PowerPointGenerator
+from services.docx_generator import WordDocumentGenerator
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -219,49 +219,49 @@ def analyze_files():
         if not result.get('success'):
             return jsonify({'error': result.get('error', 'Analysis failed')}), 500
         
-        # Generate PowerPoint presentation
-        pptx_filename = f"{property_entity}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
-        pptx_path = os.path.join(session_folder, pptx_filename)
-        pptx_available = False
+        # Generate Word document
+        docx_filename = f"{property_entity}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        docx_path = os.path.join(session_folder, docx_filename)
+        docx_available = False
         
         try:
-            pptx_generator = PowerPointGenerator()
-            pptx_generator.generate_presentation(result['recommendation'], pptx_path)
-            # Store pptx path in session for download
-            session['last_pptx_path'] = pptx_path
-            session['last_pptx_filename'] = pptx_filename
-            pptx_available = True
-        except Exception as pptx_error:
-            app.logger.error(f"PowerPoint generation failed: {str(pptx_error)}")
-            # Continue even if PowerPoint fails
+            docx_generator = WordDocumentGenerator()
+            docx_generator.generate_document(result['recommendation'], docx_path)
+            # Store docx path in session for download
+            session['last_docx_path'] = docx_path
+            session['last_docx_filename'] = docx_filename
+            docx_available = True
+        except Exception as docx_error:
+            app.logger.error(f"Word document generation failed: {str(docx_error)}")
+            # Continue even if Word document fails
         
         # Render results page
         return render_template('results.html', 
                              recommendation=result['recommendation'],
-                             pptx_available=pptx_available)
+                             docx_available=docx_available)
         
     except Exception as e:
         app.logger.error(f"Error in analysis: {str(e)}")
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
-@app.route('/download-pptx')
-def download_pptx():
-    """Download the generated PowerPoint presentation"""
+@app.route('/download-docx')
+def download_docx():
+    """Download the generated Word document"""
     try:
-        pptx_path = session.get('last_pptx_path')
-        pptx_filename = session.get('last_pptx_filename', 'analysis.pptx')
+        docx_path = session.get('last_docx_path')
+        docx_filename = session.get('last_docx_filename', 'analysis.docx')
         
-        if not pptx_path or not os.path.exists(pptx_path):
-            return jsonify({'error': 'PowerPoint file not found'}), 404
+        if not docx_path or not os.path.exists(docx_path):
+            return jsonify({'error': 'Word document file not found'}), 404
         
         return send_file(
-            pptx_path,
+            docx_path,
             as_attachment=True,
-            download_name=pptx_filename,
-            mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            download_name=docx_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         )
     except Exception as e:
-        app.logger.error(f"Error downloading PowerPoint: {str(e)}")
+        app.logger.error(f"Error downloading Word document: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/health')
