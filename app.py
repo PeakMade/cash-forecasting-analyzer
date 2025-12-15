@@ -8,6 +8,17 @@ from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
 import uuid
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
+# Debug: Print loaded environment variables
+print(f"ENV DEBUG: OPENAI_MODEL={os.environ.get('OPENAI_MODEL')}")
+print(f"ENV DEBUG: PROPERTY_DATA_SOURCE={os.environ.get('PROPERTY_DATA_SOURCE')}")
+print(f"ENV DEBUG: SECRET_KEY exists={bool(os.environ.get('SECRET_KEY'))}")
 
 from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
@@ -32,7 +43,9 @@ def allowed_file(filename):
 def index():
     """Main page with file upload form"""
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
-    return render_template('index.html', model_name=model_name)
+    data_source = os.environ.get('PROPERTY_DATA_SOURCE', 'database')
+    print(f"DEBUG: model_name={model_name}, data_source={data_source}")
+    return render_template('index.html', model_name=model_name, data_source=data_source)
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
@@ -186,9 +199,9 @@ def analyze_files():
         income_statement.save(income_statement_path)
         balance_sheet.save(balance_sheet_path)
         
-        # Get property details from database
-        from services.database import PropertyDatabase
-        db = PropertyDatabase()
+        # Get property details from data source
+        from services.data_source_factory import get_property_data_source
+        db = get_property_data_source()
         db_property = db.get_property_info(property_entity)
         
         # Build property info - use 'name' for internal processing, it gets mapped to property_name
@@ -273,8 +286,8 @@ def health_check():
 def test_database():
     """Test database connection and query"""
     try:
-        from services.database import PropertyDatabase
-        db = PropertyDatabase()
+        from services.data_source_factory import get_property_data_source
+        db = get_property_data_source()
         
         # Test connection
         if not db.test_connection():
@@ -298,8 +311,8 @@ def test_database():
 def get_properties():
     """Get list of all reportable properties for dropdown"""
     try:
-        from services.database import PropertyDatabase
-        db = PropertyDatabase()
+        from services.data_source_factory import get_property_data_source
+        db = get_property_data_source()
         properties = db.list_all_properties()
         return jsonify(properties)
     except Exception as e:
@@ -310,8 +323,8 @@ def get_properties():
 def get_property_details(entity_number):
     """Get detailed property information by entity number"""
     try:
-        from services.database import PropertyDatabase
-        db = PropertyDatabase()
+        from services.data_source_factory import get_property_data_source
+        db = get_property_data_source()
         property_info = db.get_property_info(str(entity_number))
         if property_info:
             return jsonify(property_info)

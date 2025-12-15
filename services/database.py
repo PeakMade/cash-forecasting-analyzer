@@ -59,6 +59,18 @@ class PropertyDatabase:
             logger.debug(f"Connected to SQL Server: {self.server}/{self.database}")
             return connection
             
+        except pyodbc.Error as e:
+            error_msg = str(e)
+            # Check for timeout or connection errors
+            if 'HYT00' in error_msg or 'timeout' in error_msg.lower():
+                logger.error(
+                    f"Database connection timeout to {self.server}. "
+                    "This typically means the SQL Server is not reachable from this environment. "
+                    "For Azure deployments, consider using PROPERTY_DATA_SOURCE=sharepoint or setting up Azure Hybrid Connection."
+                )
+            else:
+                logger.error(f"Database connection error: {error_msg}")
+            raise
         except Exception as e:
             logger.error(f"Database connection error: {str(e)}")
             raise
