@@ -31,9 +31,10 @@ class AzureADAuth:
         self.redirect_uri = os.environ.get('AZURE_AD_REDIRECT_URI', 
                                           'http://localhost:5000/auth/callback')
         
-        # Initial scopes - just request User.Read for login
+        # Initial scopes - just request User.Read
+        # MSAL automatically handles openid, profile, offline_access
         # SharePoint token will be acquired separately when needed
-        self.scopes = ["User.Read", "openid", "profile", "offline_access"]
+        self.scopes = ["User.Read"]
     
     def get_msal_app(self):
         """Create MSAL confidential client application"""
