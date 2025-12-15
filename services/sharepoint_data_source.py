@@ -6,7 +6,6 @@ Connects to SharePoint Online list for property data lookup
 import os
 import logging
 from typing import Dict, Any, Optional, List
-from office365.runtime.auth.user_token_provider import UserTokenProvider
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.lists.list import CamlQuery
 
