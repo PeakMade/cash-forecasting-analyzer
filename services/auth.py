@@ -91,19 +91,22 @@ class AzureADAuth:
         Returns:
             Access token string or None
         """
-        accounts = session.get('accounts', [])
-        if not accounts:
+        account = session.get('account')
+        if not account:
             return None
         
         msal_app = self.get_msal_app()
         
-        # Try to get token silently
+        # Try to get token silently (will use refresh token if needed)
         result = msal_app.acquire_token_silent(
             scopes=self.scopes,
-            account=accounts[0]
+            account=account
         )
         
         if result and "access_token" in result:
+            # Update refresh token if a new one was issued
+            if "refresh_token" in result:
+                session['refresh_token'] = result['refresh_token']
             return result["access_token"]
         
         return None
@@ -115,9 +118,9 @@ class AzureADAuth:
         Returns:
             Access token for SharePoint API
         """
-        accounts = session.get('accounts', [])
-        if not accounts:
-            logger.warning("No accounts in session for SharePoint token")
+        account = session.get('account')
+        if not account:
+            logger.warning("No account in session for SharePoint token")
             return None
         
         msal_app = self.get_msal_app()
@@ -128,7 +131,7 @@ class AzureADAuth:
         
         result = msal_app.acquire_token_silent(
             scopes=sharepoint_scopes,
-            account=accounts[0]
+            account=account
         )
         
         if result and "access_token" in result:
@@ -159,7 +162,7 @@ def login_required(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get('user'):
+        if not session.get('authenticated'):
             # Store the original URL to redirect back after login
             session['next_url'] = request.url
             return redirect(url_for('login'))

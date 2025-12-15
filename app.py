@@ -64,15 +64,21 @@ def auth_callback():
     if not result:
         return jsonify({'error': 'Failed to acquire token'}), 401
     
-    # Store user info and tokens in session
+    # Store minimal user info in session (avoid large cookies)
+    id_token_claims = result.get('id_token_claims', {})
     session['user'] = {
-        'name': result.get('id_token_claims', {}).get('name', 'Unknown'),
-        'email': result.get('id_token_claims', {}).get('preferred_username', ''),
-        'id': result.get('id_token_claims', {}).get('oid', '')
+        'name': id_token_claims.get('name', 'Unknown'),
+        'email': id_token_claims.get('preferred_username', ''),
+        'id': id_token_claims.get('oid', '')
     }
-    session['access_token'] = result.get('access_token')
+    # Store only essential account info for token refresh
+    session['account'] = {
+        'home_account_id': id_token_claims.get('oid', ''),
+        'environment': 'login.microsoftonline.com',
+        'realm': id_token_claims.get('tid', '')
+    }
     session['refresh_token'] = result.get('refresh_token')
-    session['accounts'] = [result.get('id_token_claims')]
+    session['authenticated'] = True
     
     # Redirect to original URL or home
     next_url = session.pop('next_url', url_for('index'))
