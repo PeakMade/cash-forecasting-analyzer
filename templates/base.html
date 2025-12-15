@@ -33,6 +33,10 @@
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 30px;
+            position: relative;
+        }
+        
+        .header-content {
             text-align: center;
         }
         
@@ -44,6 +48,36 @@
         .header p {
             font-size: 1.1rem;
             opacity: 0.9;
+        }
+        
+        .user-info {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .user-name {
+            font-size: 0.9rem;
+            opacity: 0.95;
+        }
+        
+        .logout-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: all 0.3s;
+        }
+        
+        .logout-btn:hover {
+            background: rgba(255,255,255,0.3);
         }
         
         .content {
@@ -90,8 +124,14 @@
             <div style="flex: 1; display: flex; justify-content: center; align-items: center; height: 80px;">
                 <h1 style="font-size: 22px; font-family: 'Open Sans', Arial, sans-serif; font-weight: 700; color: #fff; margin: 0; letter-spacing: 1px; text-shadow: 0 2px 6px rgba(0,0,0,0.12); line-height: 1.2; text-align: center;">{% block app_title %}💰 Cash Forecast Analyzer{% endblock %}</h1>
             </div>
-            <!-- Right Logo (Redpoint) -->
-            <div style="flex: 1; display: flex; justify-content: flex-end; align-items: center; height: 80px;">
+            <!-- Right section with User Info and Logo -->
+            <div style="flex: 1; display: flex; justify-content: flex-end; align-items: center; height: 80px; gap: 20px;">
+                {% if session.get('user') %}
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <span style="color: white; font-size: 0.9rem; opacity: 0.95;">{{ session['user']['name'] }}</span>
+                    <a href="{{ url_for('logout') }}" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.4); padding: 6px 14px; border-radius: 5px; text-decoration: none; font-size: 0.85rem; transition: all 0.3s;">Logout</a>
+                </div>
+                {% endif %}
                 <img src="{{ url_for('static', filename='Redpoint_logo.png') }}" alt="Redpoint Logo" style="height: 32px; width: auto;">
             </div>
         </div>

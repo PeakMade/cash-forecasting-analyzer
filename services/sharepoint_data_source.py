@@ -6,7 +6,7 @@ Connects to SharePoint Online list for property data lookup
 import os
 import logging
 from typing import Dict, Any, Optional, List
-from office365.runtime.auth.client_credential import ClientCredential
+from office365.runtime.auth.user_token_provider import UserTokenProvider
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.lists.list import CamlQuery
 
@@ -16,36 +16,37 @@ logger = logging.getLogger(__name__)
 class SharePointDataSource:
     """Handle SharePoint Online connections and property data queries"""
     
-    def __init__(self):
+    def __init__(self, access_token: Optional[str] = None):
+        """
+        Initialize SharePoint data source
+        
+        Args:
+            access_token: User's access token for delegated authentication
+        """
         self.site_url = os.environ.get('SHAREPOINT_SITE_URL', '')
         self.list_name = os.environ.get('SHAREPOINT_LIST_NAME', 'Properties_0')
-        
-        # Support app-only authentication (preferred for Conditional Access)
-        self.client_id = os.environ.get('SHAREPOINT_CLIENT_ID', '')
-        self.client_secret = os.environ.get('SHAREPOINT_CLIENT_SECRET', '')
+        self.access_token = access_token
         
         if not self.site_url:
             raise ValueError("SHAREPOINT_SITE_URL is required")
-        
-        if not self.client_id or not self.client_secret:
-            raise ValueError(
-                "SharePoint app-only authentication required. Please configure: "
-                "SHAREPOINT_CLIENT_ID and SHAREPOINT_CLIENT_SECRET. "
-                "See SHAREPOINT_INTEGRATION.md for setup instructions."
-            )
     
     def _get_context(self) -> ClientContext:
         """
-        Create SharePoint client context with app-only authentication
-        This bypasses Conditional Access policies that block user credential auth
+        Create SharePoint client context with user token
+        Uses delegated permissions via logged-in user's access token
         
         Returns:
             ClientContext object for SharePoint operations
         """
         try:
-            credentials = ClientCredential(self.client_id, self.client_secret)
-            ctx = ClientContext(self.site_url).with_credentials(credentials)
-            logger.debug(f"Connected to SharePoint using app-only auth: {self.site_url}")
+            if not self.access_token:
+                raise ValueError("Access token required for SharePoint authentication")
+            
+            # Use user's access token for authentication
+            ctx = ClientContext(self.site_url).with_access_token(
+                lambda: self.access_token
+            )
+            logger.debug(f"Connected to SharePoint using user token: {self.site_url}")
             return ctx
         except Exception as e:
             logger.error(f"SharePoint connection error: {str(e)}")

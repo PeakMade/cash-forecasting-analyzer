@@ -3,7 +3,7 @@ Cash Forecast Analyzer - Main Flask Application
 Analyzes student housing property cash forecasts and validates accountant recommendations
 """
 
-from flask import Flask, render_template, request, jsonify, session, send_file
+from flask import Flask, render_template, request, jsonify, session, send_file, redirect, url_for
 from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
@@ -24,6 +24,7 @@ from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
 from services.summary_generator import SummaryGenerator
 from services.docx_generator import WordDocumentGenerator
+from services.auth import AzureADAuth, login_required, get_user
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -34,12 +35,57 @@ app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv', 'txt', 'pdf'}
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# Initialize Azure AD authentication
+azure_auth = AzureADAuth(app)
+
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
+# Authentication routes
+@app.route('/login')
+def login():
+    """Initiate Azure AD login flow"""
+    auth_url = azure_auth.get_auth_url()
+    return redirect(auth_url)
+
+@app.route('/auth/callback')
+def auth_callback():
+    """Handle Azure AD callback after login"""
+    code = request.args.get('code')
+    
+    if not code:
+        return jsonify({'error': 'No authorization code received'}), 400
+    
+    # Exchange code for token
+    result = azure_auth.acquire_token_by_auth_code(code)
+    
+    if not result:
+        return jsonify({'error': 'Failed to acquire token'}), 401
+    
+    # Store user info and tokens in session
+    session['user'] = {
+        'name': result.get('id_token_claims', {}).get('name', 'Unknown'),
+        'email': result.get('id_token_claims', {}).get('preferred_username', ''),
+        'id': result.get('id_token_claims', {}).get('oid', '')
+    }
+    session['access_token'] = result.get('access_token')
+    session['refresh_token'] = result.get('refresh_token')
+    session['accounts'] = [result.get('id_token_claims')]
+    
+    # Redirect to original URL or home
+    next_url = session.pop('next_url', url_for('index'))
+    return redirect(next_url)
+
+@app.route('/logout')
+def logout():
+    """Log out user and clear session"""
+    session.clear()
+    return redirect(url_for('index'))
+
 @app.route('/')
+@login_required
 def index():
     """Main page with file upload form"""
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
@@ -48,6 +94,7 @@ def index():
     return render_template('index.html', model_name=model_name, data_source=data_source)
 
 @app.route('/upload', methods=['POST'])
+@login_required
 def upload_files():
     """Handle file uploads and property information"""
     try:
@@ -135,12 +182,14 @@ def upload_files():
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/analysis/<analysis_id>')
+@login_required
 def view_analysis(analysis_id):
     """View detailed analysis results"""
     # TODO: Retrieve stored analysis results
     return render_template('analysis.html', analysis_id=analysis_id)
 
 @app.route('/api/drill-down/<analysis_id>/<bullet_id>')
+@login_required
 def get_drill_down(analysis_id, bullet_id):
     """Get detailed information for a specific bullet point"""
     # TODO: Retrieve detailed drill-down data
@@ -150,6 +199,7 @@ def get_drill_down(analysis_id, bullet_id):
     })
 
 @app.route('/api/analyze', methods=['POST'])
+@login_required
 def analyze_files():
     """
     Process uploaded files and generate comprehensive recommendation
@@ -201,7 +251,8 @@ def analyze_files():
         
         # Get property details from data source
         from services.data_source_factory import get_property_data_source
-        db = get_property_data_source()
+        access_token = azure_auth.get_sharepoint_token()
+        db = get_property_data_source(access_token=access_token)
         db_property = db.get_property_info(property_entity)
         
         # Build property info - use 'name' for internal processing, it gets mapped to property_name
@@ -258,6 +309,7 @@ def analyze_files():
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/download-docx')
+@login_required
 def download_docx():
     """Download the generated Word document"""
     try:
@@ -283,11 +335,13 @@ def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 @app.route('/test-db')
+@login_required
 def test_database():
     """Test database connection and query"""
     try:
         from services.data_source_factory import get_property_data_source
-        db = get_property_data_source()
+        access_token = azure_auth.get_sharepoint_token()
+        db = get_property_data_source(access_token=access_token)
         
         # Test connection
         if not db.test_connection():
@@ -308,11 +362,13 @@ def test_database():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/properties')
+@login_required
 def get_properties():
     """Get list of all reportable properties for dropdown"""
     try:
         from services.data_source_factory import get_property_data_source
-        db = get_property_data_source()
+        access_token = azure_auth.get_sharepoint_token()
+        db = get_property_data_source(access_token=access_token)
         properties = db.list_all_properties()
         return jsonify(properties)
     except Exception as e:
@@ -320,11 +376,13 @@ def get_properties():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/property/<int:entity_number>')
+@login_required
 def get_property_details(entity_number):
     """Get detailed property information by entity number"""
     try:
         from services.data_source_factory import get_property_data_source
-        db = get_property_data_source()
+        access_token = azure_auth.get_sharepoint_token()
+        db = get_property_data_source(access_token=access_token)
         property_info = db.get_property_info(str(entity_number))
         if property_info:
             return jsonify(property_info)
