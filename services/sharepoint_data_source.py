@@ -6,6 +6,7 @@ Connects to SharePoint Online list for property data lookup
 import os
 import logging
 from typing import Dict, Any, Optional, List
+from office365.runtime.auth.authentication_context import AuthenticationContext
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.lists.list import CamlQuery
 
@@ -41,10 +42,12 @@ class SharePointDataSource:
             if not self.access_token:
                 raise ValueError("Access token required for SharePoint authentication")
             
-            # Use user's access token for authentication
-            ctx = ClientContext(self.site_url).with_access_token(
-                lambda: self.access_token
-            )
+            # Create authentication context with user's access token
+            auth_ctx = AuthenticationContext(self.site_url)
+            auth_ctx.acquire_token_for_user = lambda: self.access_token
+            
+            # Create client context with the authenticated context
+            ctx = ClientContext(self.site_url, auth_ctx)
             logger.debug(f"Connected to SharePoint using user token: {self.site_url}")
             return ctx
         except Exception as e:
