@@ -6,9 +6,9 @@ Connects to SharePoint Online list for property data lookup
 import os
 import logging
 from typing import Dict, Any, Optional, List
-from office365.runtime.auth.authentication_context import AuthenticationContext
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.lists.list import CamlQuery
+from office365.runtime.auth.token_response import TokenResponse
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +42,23 @@ class SharePointDataSource:
             if not self.access_token:
                 raise ValueError("Access token required for SharePoint authentication")
             
-            # Create authentication context with user's access token
-            auth_ctx = AuthenticationContext(self.site_url)
-            auth_ctx.acquire_token_for_user = lambda: self.access_token
+            print(f"=== CREATING SHAREPOINT CONTEXT ===")
+            print(f"Site URL: {self.site_url}")
+            print(f"Access token length: {len(self.access_token)}")
+            print(f"Access token starts with: {self.access_token[:50]}...")
             
-            # Create client context with the authenticated context
-            ctx = ClientContext(self.site_url, auth_ctx)
+            # Create client context with access token
+            # with_access_token() expects a callable that returns a TokenResponse object
+            def token_provider():
+                token = TokenResponse()
+                token.accessToken = self.access_token
+                token.tokenType = "Bearer"
+                return token
+            
+            ctx = ClientContext(self.site_url).with_access_token(token_provider)
+            
+            print(f"=== CONTEXT CREATED SUCCESSFULLY ===")
+            
             logger.debug(f"Connected to SharePoint using user token: {self.site_url}")
             return ctx
         except Exception as e:
@@ -168,6 +179,9 @@ class SharePointDataSource:
                 }
                 for item in items
             ]
+            
+            # Sort by property name (in case CAML OrderBy doesn't work)
+            properties.sort(key=lambda x: x['property_name'].upper() if x['property_name'] else '')
             
             logger.info(f"Retrieved {len(properties)} reportable properties from SharePoint")
             return properties

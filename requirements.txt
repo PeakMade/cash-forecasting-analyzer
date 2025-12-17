@@ -43,5 +43,8 @@ Office365-REST-Python-Client==2.5.3
 # Azure AD authentication
 msal==1.26.0
 
+# Server-side session storage
+Flask-Session==0.5.0
+
 # Production WSGI server
 gunicorn==21.2.0

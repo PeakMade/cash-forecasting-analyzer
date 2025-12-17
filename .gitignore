@@ -30,6 +30,7 @@ wheels/
 # Flask
 instance/
 .webassets-cache
+flask_session/
 
 # Uploaded files
 uploads/

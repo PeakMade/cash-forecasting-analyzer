@@ -31,18 +31,30 @@ class AzureADAuth:
         self.redirect_uri = os.environ.get('AZURE_AD_REDIRECT_URI', 
                                           'http://localhost:5000/auth/callback')
         
-        # Initial scopes - just request User.Read
-        # MSAL automatically handles openid, profile, offline_access
-        # SharePoint token will be acquired separately when needed
+        # Initial scopes - request both Graph and SharePoint access during login
+        # This ensures user consents to both at once
         self.scopes = ["User.Read"]
+        self.sharepoint_url = os.environ.get('SHAREPOINT_SITE_URL', 'https://peakcampus.sharepoint.com/sites/BaseCampApps')
     
-    def get_msal_app(self):
-        """Create MSAL confidential client application"""
-        return msal.ConfidentialClientApplication(
+    def get_msal_app(self, cache=None):
+        """Create MSAL confidential client application with token cache"""
+        # Use session-based token cache if available
+        if cache is None and 'token_cache' in session:
+            cache = msal.SerializableTokenCache()
+            cache.deserialize(session['token_cache'])
+        
+        app = msal.ConfidentialClientApplication(
             self.client_id,
             authority=self.authority,
-            client_credential=self.client_secret
+            client_credential=self.client_secret,
+            token_cache=cache
         )
+        
+        # Save cache back to session if it changed
+        if cache and cache.has_state_changed:
+            session['token_cache'] = cache.serialize()
+        
+        return app
     
     def get_auth_url(self):
         """
@@ -59,6 +71,67 @@ class AzureADAuth:
         )
         
         return auth_url
+    
+    def get_sharepoint_consent_url(self):
+        """
+        Generate SharePoint consent URL
+        
+        Returns:
+            Authorization URL for SharePoint consent
+        """
+        msal_app = self.get_msal_app()
+        sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
+        
+        auth_url = msal_app.get_authorization_request_url(
+            scopes=sharepoint_scopes,
+            redirect_uri=self.redirect_uri
+        )
+        
+        return auth_url
+    
+    def acquire_sharepoint_token_by_code(self, code):
+        """
+        Exchange authorization code for SharePoint access token
+        
+        Args:
+            code: Authorization code from callback
+            
+        Returns:
+            Token response dictionary with access_token
+        """
+        # Don't use cache - we'll store the token directly in the session
+        msal_app = self.get_msal_app(cache=None)
+        sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
+        
+        result = msal_app.acquire_token_by_authorization_code(
+            code,
+            scopes=sharepoint_scopes,
+            redirect_uri=self.redirect_uri
+        )
+        
+        if "error" in result:
+            logger.error(f"SharePoint token acquisition error: {result.get('error_description')}")
+            return None
+        
+        print(f"### SharePoint token acquired successfully")
+        
+        # Debug: decode token to check audience
+        try:
+            import base64
+            import json
+            token_parts = result['access_token'].split('.')
+            if len(token_parts) >= 2:
+                # Decode payload (add padding if needed)
+                payload = token_parts[1]
+                payload += '=' * (4 - len(payload) % 4)
+                decoded = base64.b64decode(payload)
+                token_data = json.loads(decoded)
+                print(f"### Token audience (aud): {token_data.get('aud', 'N/A')}")
+                print(f"### Token scopes (scp): {token_data.get('scp', 'N/A')}")
+        except Exception as e:
+            print(f"### Could not decode token: {e}")
+        
+        return result
     
     def acquire_token_by_auth_code(self, code):
         """
@@ -113,40 +186,18 @@ class AzureADAuth:
     
     def get_sharepoint_token(self):
         """
-        Get SharePoint-specific access token using on-behalf-of flow
+        Get SharePoint-specific access token
         
         Returns:
             Access token for SharePoint API
         """
-        account = session.get('account')
-        if not account:
-            logger.warning("No account in session for SharePoint token")
-            return None
+        # Check if we have a stored SharePoint token
+        sharepoint_token = session.get('sharepoint_access_token')
+        if sharepoint_token:
+            print("### Returning stored SharePoint access token from session")
+            return sharepoint_token
         
-        msal_app = self.get_msal_app()
-        
-        # Request SharePoint-specific token with User.Read scope
-        # Using AllSites.Read delegated permission
-        sharepoint_scopes = ["https://peakcampus.sharepoint.com/AllSites.Read"]
-        
-        result = msal_app.acquire_token_silent(
-            scopes=sharepoint_scopes,
-            account=account
-        )
-        
-        if result and "access_token" in result:
-            return result["access_token"]
-        
-        # If silent fails, try to acquire new token
-        if session.get('refresh_token'):
-            result = msal_app.acquire_token_by_refresh_token(
-                session['refresh_token'],
-                scopes=sharepoint_scopes
-            )
-            
-            if result and "access_token" in result:
-                return result["access_token"]
-        
+        print("### No SharePoint token in session")
         return None
 
 

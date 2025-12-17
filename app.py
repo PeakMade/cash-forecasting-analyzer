@@ -4,6 +4,7 @@ Analyzes student housing property cash forecasts and validates accountant recomm
 """
 
 from flask import Flask, render_template, request, jsonify, session, send_file, redirect, url_for
+from flask_session import Session
 from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
@@ -32,6 +33,13 @@ app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv', 'txt', 'pdf'}
 
+# Configure server-side session storage (avoids cookie size limits)
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_FILE_DIR'] = os.path.join(os.path.dirname(__file__), 'flask_session')
+app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_USE_SIGNER'] = True
+Session(app)
+
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -58,8 +66,41 @@ def auth_callback():
     if not code:
         return jsonify({'error': 'No authorization code received'}), 400
     
+    # Check if this is SharePoint consent flow
+    is_sharepoint_consent = session.get('sharepoint_consent_flow', False)
+    print(f"=== CALLBACK - Is SharePoint consent: {is_sharepoint_consent} ===")
+    
     # Exchange code for token
-    result = azure_auth.acquire_token_by_auth_code(code)
+    if is_sharepoint_consent:
+        print("=== PROCESSING SHAREPOINT CONSENT CALLBACK ===")
+        result = azure_auth.acquire_sharepoint_token_by_code(code)
+        print(f"=== SharePoint token result: {bool(result)} ===")
+        if result:
+            print(f"=== SharePoint token has access_token: {'access_token' in result} ===")
+        session.pop('sharepoint_consent_flow', None)
+        if result and 'access_token' in result:
+            # Store the SharePoint access token directly in session (smaller than full cache)
+            session['sharepoint_access_token'] = result['access_token']
+            session['sharepoint_consented'] = True
+            
+            # Debug: print session sizes
+            import json
+            print(f"=== SESSION SIZE BREAKDOWN ===")
+            for key, value in session.items():
+                try:
+                    size = len(json.dumps(value))
+                    print(f"  {key}: {size} bytes")
+                except:
+                    print(f"  {key}: (cannot serialize)")
+            
+            print("=== SHAREPOINT TOKEN STORED IN SESSION - REDIRECTING TO INDEX ===")
+            return redirect(url_for('index'))
+        else:
+            print("=== SHAREPOINT CONSENT FAILED ===")
+            return jsonify({'error': 'Failed to acquire SharePoint token'}), 401
+    else:
+        print("=== PROCESSING INITIAL LOGIN CALLBACK ===")
+        result = azure_auth.acquire_token_by_auth_code(code)
     
     if not result:
         return jsonify({'error': 'Failed to acquire token'}), 401
@@ -80,15 +121,34 @@ def auth_callback():
     session['refresh_token'] = result.get('refresh_token')
     session['authenticated'] = True
     
-    # Redirect to original URL or home
-    next_url = session.pop('next_url', url_for('index'))
-    return redirect(next_url)
+    # After initial login, redirect to SharePoint consent
+    return redirect(url_for('sharepoint_consent'))
+
+@app.route('/auth/sharepoint-consent')
+@login_required
+def sharepoint_consent():
+    """Initiate SharePoint consent flow"""
+    print("=== INITIATING SHAREPOINT CONSENT FLOW ===")
+    session['sharepoint_consent_flow'] = True
+    session['sharepoint_consented'] = False  # Clear any existing consent flag
+    auth_url = azure_auth.get_sharepoint_consent_url()
+    print(f"=== CONSENT URL: {auth_url} ===")
+    return redirect(auth_url)
 
 @app.route('/logout')
 def logout():
     """Log out user and clear session"""
     session.clear()
-    return redirect(url_for('index'))
+    
+    # Redirect to Azure AD logout to clear SSO session
+    tenant_id = os.environ.get('AZURE_AD_TENANT_ID')
+    logout_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/logout"
+    
+    # Add post_logout_redirect_uri to return to our app
+    post_logout_redirect = request.host_url
+    logout_url += f"?post_logout_redirect_uri={post_logout_redirect}"
+    
+    return redirect(logout_url)
 
 @app.route('/')
 @login_required
@@ -373,28 +433,41 @@ def get_properties():
     """Get list of all reportable properties for dropdown"""
     try:
         from services.data_source_factory import get_property_data_source
+        print("=== ATTEMPTING TO GET SHAREPOINT TOKEN ===")
         access_token = azure_auth.get_sharepoint_token()
+        print(f"=== SHAREPOINT TOKEN ACQUIRED: {bool(access_token)} ===")
+        if not access_token:
+            print("=== ERROR: NO SHAREPOINT TOKEN ===")
+            return jsonify({'error': 'Authentication failed - no SharePoint token'}), 401
         db = get_property_data_source(access_token=access_token)
+        print("=== FETCHING PROPERTIES FROM SHAREPOINT ===")
         properties = db.list_all_properties()
+        print(f"=== SUCCESSFULLY FETCHED {len(properties)} PROPERTIES ===")
         return jsonify(properties)
     except Exception as e:
-        app.logger.error(f"Error fetching properties: {str(e)}")
+        import traceback
+        print(f"=== ERROR FETCHING PROPERTIES: {str(e)} ===")
+        print(f"=== TRACEBACK: {traceback.format_exc()} ===")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/property/<int:entity_number>')
+@app.route('/api/property/<entity_number>')
 @login_required
 def get_property_details(entity_number):
     """Get detailed property information by entity number"""
     try:
+        print(f"=== FETCHING PROPERTY DETAILS FOR: {entity_number} ===")
         from services.data_source_factory import get_property_data_source
         access_token = azure_auth.get_sharepoint_token()
         db = get_property_data_source(access_token=access_token)
         property_info = db.get_property_info(str(entity_number))
         if property_info:
+            print(f"=== PROPERTY INFO FOUND: {property_info} ===")
             return jsonify(property_info)
         else:
+            print(f"=== PROPERTY NOT FOUND: {entity_number} ===")
             return jsonify({'error': 'Property not found'}), 404
     except Exception as e:
+        print(f"=== ERROR FETCHING PROPERTY: {str(e)} ===")
         app.logger.error(f"Error fetching property details: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
