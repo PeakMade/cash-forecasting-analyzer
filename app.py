@@ -291,14 +291,6 @@ def analyze_files():
         zip_code = request.form.get('zip_code', '').strip()
         university = request.form.get('university', '').strip()
         
-        # Debug: Print what we received
-        print(f"=== FORM DATA RECEIVED ===")
-        print(f"property_name: '{property_entity}'")
-        print(f"property_address: '{property_address}'")
-        print(f"zip_code: '{zip_code}'")
-        print(f"university: '{university}'")
-        print(f"=========================")
-        
         if not all([property_entity, property_address, zip_code, university]):
             return jsonify({'error': 'All property information fields are required'}), 400
         
@@ -323,21 +315,20 @@ def analyze_files():
         income_statement.save(income_statement_path)
         balance_sheet.save(balance_sheet_path)
         
-        # Build property info from form data
-        # TODO: Re-enable SharePoint lookup once ENTITY_NUMBER column is available
-        # from services.data_source_factory import get_property_data_source
-        # access_token = azure_auth.get_sharepoint_token()
-        # db = get_property_data_source(access_token=access_token)
-        # db_property = db.get_property_info(property_entity)
+        # Get property details from SharePoint
+        from services.data_source_factory import get_property_data_source
+        access_token = azure_auth.get_sharepoint_token()
+        db = get_property_data_source(access_token=access_token)
+        db_property = db.get_property_info(property_entity)
         
         property_info = {
-            'entity_number': 'Unknown',  # Will be extracted from filename by FileProcessor
-            'name': property_entity,  # Use the property name from dropdown
-            'address': property_address,
-            'city': 'Unknown',  # Will be populated once SharePoint has full data
-            'state': 'Unknown',
-            'zip': zip_code,
-            'university': university,
+            'entity_number': property_entity,
+            'name': db_property.get('name', property_entity),
+            'address': db_property.get('address', property_address),
+            'city': db_property.get('city', 'Unknown'),
+            'state': db_property.get('state', 'Unknown'),
+            'zip': db_property.get('zip', zip_code),
+            'university': db_property.get('university', university),
             'analysis_date': datetime.now().isoformat()
         }
         
