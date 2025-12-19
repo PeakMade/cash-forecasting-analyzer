@@ -323,11 +323,11 @@ def analyze_files():
         
         property_info = {
             'entity_number': property_entity,
-            'name': db_property.get('name', property_entity),
+            'name': db_property.get('property_name', property_entity),
             'address': db_property.get('address', property_address),
             'city': db_property.get('city', 'Unknown'),
             'state': db_property.get('state', 'Unknown'),
-            'zip': db_property.get('zip', zip_code),
+            'zip': db_property.get('zip_code', zip_code),
             'university': db_property.get('university', university),
             'analysis_date': datetime.now().isoformat()
         }
@@ -435,9 +435,18 @@ def get_properties():
         print("=== ATTEMPTING TO GET SHAREPOINT TOKEN ===")
         access_token = azure_auth.get_sharepoint_token()
         print(f"=== SHAREPOINT TOKEN ACQUIRED: {bool(access_token)} ===")
+        
         if not access_token:
-            print("=== ERROR: NO SHAREPOINT TOKEN ===")
-            return jsonify({'error': 'Authentication failed - no SharePoint token'}), 401
+            print("=== ERROR: NO SHAREPOINT TOKEN - USER NEEDS TO CONSENT ===")
+            print(f"=== User: {session.get('user', {}).get('email')} ===")
+            print(f"=== SharePoint consented: {session.get('sharepoint_consented', False)} ===")
+            return jsonify({
+                'error': 'SharePoint access not granted',
+                'message': 'Please complete SharePoint authorization',
+                'needs_consent': True,
+                'consent_url': url_for('sharepoint_consent')
+            }), 401
+            
         db = get_property_data_source(access_token=access_token)
         print("=== FETCHING PROPERTIES FROM SHAREPOINT ===")
         properties = db.list_all_properties()
@@ -445,9 +454,24 @@ def get_properties():
         return jsonify(properties)
     except Exception as e:
         import traceback
+        error_trace = traceback.format_exc()
         print(f"=== ERROR FETCHING PROPERTIES: {str(e)} ===")
-        print(f"=== TRACEBACK: {traceback.format_exc()} ===")
-        return jsonify({'error': str(e)}), 500
+        print(f"=== TRACEBACK: {error_trace} ===")
+        print(f"=== User: {session.get('user', {}).get('email')} ===")
+        
+        # Check if it's a permission error
+        if 'Access denied' in str(e) or 'Forbidden' in str(e) or '403' in str(e):
+            return jsonify({
+                'error': 'SharePoint access denied',
+                'message': 'You do not have permission to access the SharePoint list',
+                'details': str(e)
+            }), 403
+            
+        return jsonify({
+            'error': 'Failed to load properties',
+            'message': str(e),
+            'trace': error_trace if app.debug else None
+        }), 500
 
 @app.route('/api/property/<entity_number>')
 @login_required

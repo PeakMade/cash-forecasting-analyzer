@@ -233,23 +233,31 @@
 window.addEventListener('DOMContentLoaded', async () => {
     try {
         const response = await fetch('/api/properties');
-        const properties = await response.json();
+        const data = await response.json();
         
         const select = document.getElementById('property_name');
         const loadingText = document.getElementById('loading-properties');
         
-        if (response.ok && Array.isArray(properties)) {
-            properties.forEach(prop => {
+        if (response.ok && Array.isArray(data)) {
+            data.forEach(prop => {
                 const option = document.createElement('option');
                 option.value = prop.entity_number;
                 option.textContent = prop.property_name;
                 select.appendChild(option);
             });
-            loadingText.textContent = `${properties.length} properties available`;
+            loadingText.textContent = `${data.length} properties available`;
             loadingText.style.color = '#28a745';
-        } else {
-            loadingText.textContent = 'Error loading properties';
+        } else if (data.needs_consent) {
+            // User needs to grant SharePoint access
+            loadingText.innerHTML = 'SharePoint access required. <a href="' + data.consent_url + '">Click here to authorize</a>';
+            loadingText.style.color = '#ffc107';
+        } else if (response.status === 403) {
+            loadingText.textContent = 'Access denied: ' + (data.message || 'No permission to access SharePoint list');
             loadingText.style.color = '#dc3545';
+        } else {
+            loadingText.textContent = 'Error loading properties: ' + (data.message || data.error || 'Unknown error');
+            loadingText.style.color = '#dc3545';
+            console.error('Properties API error:', data);
         }
     } catch (error) {
         console.error('Error loading properties:', error);
