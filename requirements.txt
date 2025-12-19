@@ -1,4 +1,5 @@
 # Flask web framework
+# Updated 2025-12-19: Force rebuild for Flask-Session 0.8.0
 Flask==3.0.0
 Werkzeug==3.0.1
 
