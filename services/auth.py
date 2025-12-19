@@ -31,9 +31,10 @@ class AzureADAuth:
         self.redirect_uri = os.environ.get('AZURE_AD_REDIRECT_URI', 
                                           'http://localhost:5000/auth/callback')
         
-        # Initial scopes - request both Graph and SharePoint access during login
-        # This ensures user consents to both at once
-        self.scopes = ["User.Read"]
+        # Use .default scope to get all configured API permissions in one token
+        # This includes both Graph API (User.Read) and SharePoint access
+        # configured in Azure AD app registration
+        self.scopes = ["https://peakcampus.sharepoint.com/.default"]
         self.sharepoint_url = os.environ.get('SHAREPOINT_SITE_URL', 'https://peakcampus.sharepoint.com/sites/BaseCampApps')
     
     def get_msal_app(self, cache=None):

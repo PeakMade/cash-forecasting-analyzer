@@ -121,8 +121,13 @@ def auth_callback():
     session['refresh_token'] = result.get('refresh_token')
     session['authenticated'] = True
     
-    # After initial login, redirect to SharePoint consent
-    return redirect(url_for('sharepoint_consent'))
+    # Store SharePoint token from initial login (both scopes requested at once)
+    if 'access_token' in result:
+        session['sharepoint_access_token'] = result['access_token']
+        print(f"### SharePoint token stored from initial login (length: {len(result['access_token'])})")
+    
+    # Redirect directly to index - no second consent needed
+    return redirect(url_for('index'))
 
 @app.route('/auth/sharepoint-consent')
 @login_required
