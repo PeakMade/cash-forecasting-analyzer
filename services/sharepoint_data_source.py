@@ -76,36 +76,52 @@ class SharePointDataSource:
             Dictionary with property details or None if not found
         """
         try:
+            print(f"=== SHAREPOINT QUERY START ===")
+            print(f"Looking for property_identifier: {property_identifier}")
+            print(f"Type: {type(property_identifier)}")
+            
             ctx = self._get_context()
             
             # Get the list
             sp_list = ctx.web.lists.get_by_title(self.list_name)
             
-            # Query for the property - try both ENTITY_NUMBER and PROPERTY_NAME
-            caml_query_xml = f"""
-                <View>
-                    <Query>
-                        <Where>
-                            <Or>
-                                <Eq>
-                                    <FieldRef Name='ENTITY_NUMBER'/>
-                                    <Value Type='Text'>{property_identifier}</Value>
-                                </Eq>
-                                <Eq>
-                                    <FieldRef Name='PROPERTY_NAME'/>
-                                    <Value Type='Text'>{property_identifier}</Value>
-                                </Eq>
-                            </Or>
-                        </Where>
-                    </Query>
-                    <RowLimit>1</RowLimit>
-                </View>
-            """
+            # Determine if property_identifier is numeric (entity number) or text (property name)
+            is_numeric = property_identifier.isdigit()
             
-            caml_query = CamlQuery.parse(caml_query_xml)
-            items = sp_list.get_items(caml_query).execute_query()
+            # Use filter instead of CAML query for more reliable results
+            if is_numeric:
+                # Filter by ENTITY_NUMBER
+                filter_expr = f"ENTITY_NUMBER eq {property_identifier}"
+                print(f"=== USING FILTER: {filter_expr} ===")
+                items = sp_list.items.filter(filter_expr).top(1).get().execute_query()
+            else:
+                # Filter by PROPERTY_NAME
+                filter_expr = f"PROPERTY_NAME eq '{property_identifier}'"
+                print(f"=== USING FILTER: {filter_expr} ===")
+                items = sp_list.items.filter(filter_expr).top(1).get().execute_query()
+            
+            print(f"=== FILTER RETURNED {len(items)} ITEMS ===")
+            
+            if len(items) == 0:
+                print(f"=== NO ITEMS FOUND FOR: {property_identifier} ===")
+                logger.warning(f"Property not found in SharePoint: {property_identifier}")
+                return None
             
             if len(items) > 0:
+                print(f"First item ENTITY_NUMBER: {items[0].properties.get('ENTITY_NUMBER')}")
+                print(f"First item PROPERTY_NAME: {items[0].properties.get('PROPERTY_NAME')}")
+                
+                # CRITICAL: Verify we got the right record
+                entity_match = str(items[0].properties.get('ENTITY_NUMBER')) == str(property_identifier)
+                name_match = items[0].properties.get('PROPERTY_NAME') == property_identifier
+                
+                if not (entity_match or name_match):
+                    print(f"=== WARNING: Query returned wrong property! ===")
+                    print(f"Requested: {property_identifier}")
+                    print(f"Got ENTITY_NUMBER: {items[0].properties.get('ENTITY_NUMBER')}")
+                    print(f"Got PROPERTY_NAME: {items[0].properties.get('PROPERTY_NAME')}")
+                    logger.error(f"SharePoint query returned wrong property. Requested: {property_identifier}, Got: {items[0].properties.get('ENTITY_NUMBER')}")
+                    return None
                 item = items[0].properties
                 
                 # Format the address: ADDRESS_1[, ADDRESS_2], ADDRESS_CITY, ADDRESS_STATE
