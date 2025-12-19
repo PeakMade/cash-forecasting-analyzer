@@ -241,7 +241,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (response.ok && Array.isArray(properties)) {
             properties.forEach(prop => {
                 const option = document.createElement('option');
-                option.value = prop.entity_number;
+                // Temporarily use property_name as value until ENTITY_NUMBER is available in SharePoint
+                option.value = prop.property_name || prop.entity_number;
                 option.textContent = prop.property_name;
                 select.appendChild(option);
             });
@@ -258,33 +259,34 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Auto-populate form fields when property is selected
-document.getElementById('property_name').addEventListener('change', async function() {
-    const entityNumber = this.value;
-    
-    if (!entityNumber) {
-        // Clear fields if no property selected
-        document.getElementById('property_address').value = '';
-        document.getElementById('zip_code').value = '';
-        document.getElementById('university').value = '';
-        return;
-    }
-    
-    try {
-        const response = await fetch(`/api/property/${entityNumber}`);
-        const data = await response.json();
-        
-        if (response.ok && !data.error) {
-            // Populate form fields
-            document.getElementById('property_address').value = data.address || '';
-            document.getElementById('zip_code').value = data.zip_code || '';
-            document.getElementById('university').value = data.university || '';
-        } else {
-            console.error('Error fetching property details:', data.error);
-        }
-    } catch (error) {
-        console.error('Error loading property details:', error);
-    }
-});
+// Temporarily disabled auto-population until SharePoint ENTITY_NUMBER column is available
+// document.getElementById('property_name').addEventListener('change', async function() {
+//     const entityNumber = this.value;
+//     
+//     if (!entityNumber) {
+//         // Clear fields if no property selected
+//         document.getElementById('property_address').value = '';
+//         document.getElementById('zip_code').value = '';
+//         document.getElementById('university').value = '';
+//         return;
+//     }
+//     
+//     try {
+//         const response = await fetch(`/api/property/${entityNumber}`);
+//         const data = await response.json();
+//         
+//         if (response.ok && !data.error) {
+//             // Populate form fields
+//             document.getElementById('property_address').value = data.address || '';
+//             document.getElementById('zip_code').value = data.zip_code || '';
+//             document.getElementById('university').value = data.university || '';
+//         } else {
+//             console.error('Error fetching property details:', data.error);
+//         }
+//     } catch (error) {
+//         console.error('Error loading property details:', error);
+//     }
+// });
 
 // File validation patterns (case-insensitive, handles spaces and underscores)
 const fileValidation = {
