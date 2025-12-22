@@ -126,6 +126,21 @@ def auth_callback():
         session['sharepoint_access_token'] = result['access_token']
         print(f"### SharePoint token stored from initial login (length: {len(result['access_token'])})")
     
+    # Log user login activity
+    try:
+        from services.data_source_factory import get_property_data_source
+        access_token = azure_auth.get_sharepoint_token()
+        if access_token:
+            db = get_property_data_source(access_token=access_token)
+            db.log_activity(
+                user_email=session['user']['email'],
+                user_name=session['user']['name'],
+                activity_type='login'
+            )
+    except Exception as e:
+        # Don't break login if logging fails
+        print(f"=== WARNING: Failed to log login activity: {str(e)} ===")
+    
     # Redirect directly to index - no second consent needed
     return redirect(url_for('index'))
 
@@ -143,6 +158,23 @@ def sharepoint_consent():
 @app.route('/logout')
 def logout():
     """Log out user and clear session"""
+    # Log user logout activity before clearing session
+    try:
+        from services.data_source_factory import get_property_data_source
+        user_email = session.get('user', {}).get('email', 'unknown')
+        user_name = session.get('user', {}).get('name', 'unknown')
+        access_token = azure_auth.get_sharepoint_token()
+        if access_token:
+            db = get_property_data_source(access_token=access_token)
+            db.log_activity(
+                user_email=user_email,
+                user_name=user_name,
+                activity_type='logout'
+            )
+    except Exception as e:
+        # Don't break logout if logging fails
+        print(f"=== WARNING: Failed to log logout activity: {str(e)} ===")
+    
     session.clear()
     
     # Redirect to Azure AD logout to clear SSO session

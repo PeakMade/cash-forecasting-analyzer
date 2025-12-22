@@ -6,6 +6,7 @@ Connects to SharePoint Online list for property data lookup
 import os
 import logging
 from typing import Dict, Any, Optional, List
+from datetime import datetime
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.lists.list import CamlQuery
 from office365.runtime.auth.token_response import TokenResponse
@@ -25,6 +26,7 @@ class SharePointDataSource:
         """
         self.site_url = os.environ.get('SHAREPOINT_SITE_URL', '')
         self.list_name = os.environ.get('SHAREPOINT_LIST_NAME', 'Properties_0')
+        self.log_list_name = 'Innovation Use Log'
         self.access_token = access_token
         
         if not self.site_url:
@@ -205,6 +207,55 @@ class SharePointDataSource:
         except Exception as e:
             logger.error(f"Error listing SharePoint properties: {str(e)}")
             raise
+    
+    def log_activity(self, user_email: str, user_name: str, activity_type: str) -> bool:
+        """
+        Log user activity to Innovation Use Log SharePoint list
+        
+        Args:
+            user_email: User's email address
+            user_name: User's display name
+            activity_type: Type of activity (e.g., 'login', 'logout')
+            
+        Returns:
+            True if logging successful, False otherwise
+        """
+        try:
+            # Debug: decode token to see what permissions we have
+            import base64
+            import json
+            token_parts = self.access_token.split('.')
+            if len(token_parts) >= 2:
+                # Decode the payload (add padding if needed)
+                payload = token_parts[1]
+                payload += '=' * (4 - len(payload) % 4)
+                decoded = base64.b64decode(payload)
+                token_info = json.loads(decoded)
+                print(f"=== TOKEN SCOPES: {token_info.get('scp', 'N/A')} ===")
+                print(f"=== TOKEN AUDIENCE: {token_info.get('aud', 'N/A')} ===")
+            
+            ctx = self._get_context()
+            log_list = ctx.web.lists.get_by_title(self.log_list_name)
+            
+            # Create log entry with correct field names
+            log_entry = {
+                'UserEmail': user_email,
+                'UserName': user_name,
+                'LoginTimestamp': datetime.utcnow().isoformat() + 'Z',  # Note: LoginTimestamp not LoginTimeStamp
+                'UserRole': 'user',
+                'ActivityType': activity_type,
+                'Application': 'CashForecastAnalyzer'
+            }
+            
+            log_list.add_item(log_entry).execute_query()
+            logger.info(f"Logged activity: {activity_type} for {user_email}")
+            return True
+            
+        except Exception as e:
+            # Log error but don't break the application flow
+            logger.error(f"Failed to log activity to SharePoint: {str(e)}")
+            print(f"=== ERROR LOGGING ACTIVITY: {str(e)} ===")
+            return False
     
     def test_connection(self) -> bool:
         """
