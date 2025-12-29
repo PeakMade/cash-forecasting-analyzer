@@ -39,10 +39,11 @@ class AzureADAuth:
     
     def get_msal_app(self, cache=None):
         """Create MSAL confidential client application with token cache"""
-        # Use session-based token cache if available
-        if cache is None and 'token_cache' in session:
+        # Always use a token cache - initialize from session if available
+        if cache is None:
             cache = msal.SerializableTokenCache()
-            cache.deserialize(session['token_cache'])
+            if 'token_cache' in session:
+                cache.deserialize(session['token_cache'])
         
         app = msal.ConfidentialClientApplication(
             self.client_id,
@@ -52,7 +53,7 @@ class AzureADAuth:
         )
         
         # Save cache back to session if it changed
-        if cache and cache.has_state_changed:
+        if cache.has_state_changed:
             session['token_cache'] = cache.serialize()
         
         return app
@@ -100,8 +101,12 @@ class AzureADAuth:
         Returns:
             Token response dictionary with access_token
         """
-        # Don't use cache - we'll store the token directly in the session
-        msal_app = self.get_msal_app(cache=None)
+        # Use token cache so tokens/refresh tokens are persisted for future use
+        cache = msal.SerializableTokenCache()
+        if 'token_cache' in session:
+            cache.deserialize(session['token_cache'])
+            
+        msal_app = self.get_msal_app(cache=cache)
         sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
         
         result = msal_app.acquire_token_by_authorization_code(
@@ -110,27 +115,15 @@ class AzureADAuth:
             redirect_uri=self.redirect_uri
         )
         
+        # Save cache after token acquisition so refresh token is persisted
+        if cache.has_state_changed:
+            session['token_cache'] = cache.serialize()
+        
         if "error" in result:
             logger.error(f"SharePoint token acquisition error: {result.get('error_description')}")
             return None
         
-        print(f"### SharePoint token acquired successfully")
-        
-        # Debug: decode token to check audience
-        try:
-            import base64
-            import json
-            token_parts = result['access_token'].split('.')
-            if len(token_parts) >= 2:
-                # Decode payload (add padding if needed)
-                payload = token_parts[1]
-                payload += '=' * (4 - len(payload) % 4)
-                decoded = base64.b64decode(payload)
-                token_data = json.loads(decoded)
-                print(f"### Token audience (aud): {token_data.get('aud', 'N/A')}")
-                print(f"### Token scopes (scp): {token_data.get('scp', 'N/A')}")
-        except Exception as e:
-            print(f"### Could not decode token: {e}")
+        return result
         
         return result
     
@@ -142,9 +135,14 @@ class AzureADAuth:
             code: Authorization code from callback
             
         Returns:
-            Token response dictionary with access_token
+            Token response dictionary
         """
-        msal_app = self.get_msal_app()
+        # Use token cache so tokens/refresh tokens are persisted for future use
+        cache = msal.SerializableTokenCache()
+        if 'token_cache' in session:
+            cache.deserialize(session['token_cache'])
+            
+        msal_app = self.get_msal_app(cache=cache)
         
         result = msal_app.acquire_token_by_authorization_code(
             code,
@@ -152,9 +150,9 @@ class AzureADAuth:
             redirect_uri=self.redirect_uri
         )
         
-        if "error" in result:
-            logger.error(f"Token acquisition error: {result.get('error_description')}")
-            return None
+        # Save cache after token acquisition so refresh token is persisted  
+        if cache.has_state_changed:
+            session['token_cache'] = cache.serialize()
         
         return result
     
@@ -187,19 +185,49 @@ class AzureADAuth:
     
     def get_sharepoint_token(self):
         """
-        Get SharePoint-specific access token
+        Get SharePoint-specific access token with automatic refresh
+        Uses MSAL's acquire_token_silent, with fallback to refresh token if needed
         
         Returns:
             Access token for SharePoint API
         """
-        # Check if we have a stored SharePoint token
         sharepoint_token = session.get('sharepoint_access_token')
-        if sharepoint_token:
-            print("### Returning stored SharePoint access token from session")
+        if not sharepoint_token:
+            return None
+        
+        account = session.get('account')
+        if not account:
             return sharepoint_token
         
-        print("### No SharePoint token in session")
-        return None
+        # Try MSAL's built-in silent token acquisition (uses cache + refresh token)
+        msal_app = self.get_msal_app()
+        result = msal_app.acquire_token_silent(scopes=self.scopes, account=account)
+        
+        # If MSAL returned a new token, store it
+        if result and "access_token" in result:
+            session['sharepoint_access_token'] = result['access_token']
+            if "refresh_token" in result:
+                session['refresh_token'] = result['refresh_token']
+            return result['access_token']
+        
+        # Fallback: If MSAL silent acquisition didn't work, try refresh token directly
+        if not result or "access_token" not in result:
+            refresh_token = session.get('refresh_token')
+            if refresh_token:
+                try:
+                    result = msal_app.acquire_token_by_refresh_token(
+                        refresh_token,
+                        scopes=self.scopes
+                    )
+                    if result and "access_token" in result:
+                        session['sharepoint_access_token'] = result['access_token']
+                        if "refresh_token" in result:
+                            session['refresh_token'] = result['refresh_token']
+                        return result['access_token']
+                except Exception:
+                    pass  # If refresh fails, return existing token
+        
+        return sharepoint_token
 
 
 def login_required(f):
