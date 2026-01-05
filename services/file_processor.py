@@ -101,6 +101,7 @@ class FileProcessor:
         """
         Parse Excel cash forecast file
         Extracts: Free Cash Flow, Distributions/Contributions, Occupancy data, Month info
+        Supports multiple formats by auto-detecting structure
         """
         logger.info(f"Parsing cash forecast: {file_path}")
         
@@ -108,20 +109,51 @@ class FileProcessor:
             # Parse filename for property info
             filename = os.path.basename(file_path)
             entity_number, property_name, current_month = self._parse_cash_forecast_filename(filename)
+            logger.debug(f"Parsed filename - Entity: {entity_number}, Property: {property_name}, Month: {current_month}")
             
             # Read Excel file
             df = pd.read_excel(file_path, sheet_name=0, header=None)
+            logger.debug(f"Excel file loaded - Shape: {df.shape}")
             
-            # Find 2025 data columns (columns 79-93 based on prior analysis)
-            year_2025_cols = list(range(79, 94))  # Columns 79-93
+            # Auto-detect format by looking for 2025 data
+            year_2025_cols = self._find_2025_columns(df)
+            logger.debug(f"Using columns {year_2025_cols[0]} to {year_2025_cols[-1]} for 2025 data ({len(year_2025_cols)} columns)")
             
-            # Extract key rows (0-based indices)
-            status_row = df.iloc[6, year_2025_cols].tolist() if len(df) > 6 else []
-            month_row = df.iloc[7, year_2025_cols].tolist() if len(df) > 7 else []
-            budgeted_occ_row = df.iloc[4, year_2025_cols].tolist() if len(df) > 4 else []
-            actual_occ_row = df.iloc[5, year_2025_cols].tolist() if len(df) > 5 else []
-            distributions_row = df.iloc[47, year_2025_cols].tolist() if len(df) > 47 else []
-            fcf_row = df.iloc[48, year_2025_cols].tolist() if len(df) > 48 else []
+            # Find key rows dynamically by searching for labels
+            status_row_idx = self._find_row_by_label(df, ['Actual', 'Budget'], column=year_2025_cols[0])
+            if status_row_idx is None:
+                # Try looking in column 1 for status row
+                for row_idx in range(min(10, len(df))):
+                    row_vals = df.iloc[row_idx, year_2025_cols].tolist()
+                    if any('actual' in str(v).lower() for v in row_vals if pd.notna(v)):
+                        status_row_idx = row_idx
+                        break
+            
+            # Month row is typically one row after status row
+            month_row_idx = status_row_idx + 1 if status_row_idx is not None else None
+            
+            # Find occupancy rows
+            budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'])
+            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'])
+            
+            # Find FCF and distribution rows
+            fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'])
+            dist_row_idx = self._find_row_by_label(df, ['Distributions', 'Contribution', 'ACTUAL (Distributions)'])
+            
+            logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, Dist:{dist_row_idx}")
+            
+            # Extract rows
+            status_row = df.iloc[status_row_idx, year_2025_cols].tolist() if status_row_idx is not None else []
+            month_row = df.iloc[month_row_idx, year_2025_cols].tolist() if month_row_idx is not None else []
+            budgeted_occ_row = df.iloc[budgeted_occ_idx, year_2025_cols].tolist() if budgeted_occ_idx is not None else []
+            actual_occ_row = df.iloc[actual_occ_idx, year_2025_cols].tolist() if actual_occ_idx is not None else []
+            distributions_row = df.iloc[dist_row_idx, year_2025_cols].tolist() if dist_row_idx is not None else []
+            fcf_row = df.iloc[fcf_row_idx, year_2025_cols].tolist() if fcf_row_idx is not None else []
+            
+            logger.debug(f"Status row: {status_row}")
+            logger.debug(f"Month row: {month_row}")
+            logger.debug(f"FCF row: {fcf_row}")
+            logger.debug(f"Distributions row: {distributions_row}")
             
             # Find current month (most recent "Actual" = LAST actual column) and next month (first "Budget")
             current_month_idx = None
@@ -135,9 +167,25 @@ class FileProcessor:
                         next_month_idx = i
                         break
             
+            logger.debug(f"Current month index: {current_month_idx}, Next month index: {next_month_idx}")
+            
             # Extract data for current and projected months
-            current_month_name = month_row[current_month_idx] if current_month_idx is not None else 'Unknown'
-            projected_month_name = month_row[next_month_idx] if next_month_idx is not None else 'Unknown'
+            # Convert datetime objects to strings in "Month YYYY" format
+            raw_current_month = month_row[current_month_idx] if current_month_idx is not None else 'Unknown'
+            raw_projected_month = month_row[next_month_idx] if next_month_idx is not None else 'Unknown'
+            
+            # Format datetime objects as "Month YYYY" strings
+            if isinstance(raw_current_month, pd.Timestamp) or isinstance(raw_current_month, datetime):
+                current_month_name = raw_current_month.strftime('%B %Y')
+            else:
+                current_month_name = str(raw_current_month)
+                
+            if isinstance(raw_projected_month, pd.Timestamp) or isinstance(raw_projected_month, datetime):
+                projected_month_name = raw_projected_month.strftime('%B %Y')
+            else:
+                projected_month_name = str(raw_projected_month)
+            
+            logger.info(f"Current month: {current_month_name}, Projected month: {projected_month_name}")
             
             current_fcf = fcf_row[current_month_idx] if current_month_idx is not None else 0
             projected_fcf = fcf_row[next_month_idx] if next_month_idx is not None else 0
@@ -147,6 +195,8 @@ class FileProcessor:
             
             current_distributions = distributions_row[current_month_idx] if current_month_idx is not None else 0
             
+            logger.debug(f"Raw values - FCF: {current_fcf}/{projected_fcf}, Occ: {current_occupancy}/{projected_occupancy}, Dist: {current_distributions}")
+            
             # Convert to float, handle potential non-numeric values
             current_fcf = float(current_fcf) if pd.notna(current_fcf) else 0.0
             projected_fcf = float(projected_fcf) if pd.notna(projected_fcf) else 0.0
@@ -154,7 +204,11 @@ class FileProcessor:
             projected_occupancy = float(projected_occupancy) * 100 if pd.notna(projected_occupancy) else 0.0
             current_distributions = float(current_distributions) if pd.notna(current_distributions) else 0.0
             
-            return {
+            logger.info(f"Parsed values - Current FCF: ${current_fcf:,.2f}, Projected FCF: ${projected_fcf:,.2f}")
+            logger.info(f"Occupancy - Current: {current_occupancy:.1f}%, Projected: {projected_occupancy:.1f}%")
+            logger.info(f"Current distributions: ${current_distributions:,.2f}")
+            
+            result = {
                 'status': 'success',
                 'property_name': property_name,
                 'entity_number': entity_number,
@@ -168,8 +222,11 @@ class FileProcessor:
                 'file_path': file_path
             }
             
+            logger.info(f"✓ Successfully parsed cash forecast")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error parsing cash forecast: {str(e)}")
+            logger.error(f"Error parsing cash forecast: {str(e)}", exc_info=True)
             return {
                 'status': 'error',
                 'error': str(e),
@@ -375,6 +432,79 @@ class FileProcessor:
             }
     
     # Helper methods
+    
+    def _find_2025_columns(self, df: pd.DataFrame) -> list:
+        """
+        Auto-detect which columns contain 2025 data
+        Returns list of column indices
+        """
+        # Search for columns containing 2025 dates or '2025' text in first 10 rows
+        year_2025_cols = []
+        
+        for col_idx in range(df.shape[1]):
+            for row_idx in range(min(10, len(df))):
+                cell = df.iloc[row_idx, col_idx]
+                
+                # Check if it's a datetime in 2025
+                if isinstance(cell, pd.Timestamp) or hasattr(cell, 'year'):
+                    try:
+                        if cell.year == 2025:
+                            # Found a 2025 column, collect consecutive months
+                            logger.debug(f"Found 2025 data starting at column {col_idx}, row {row_idx}")
+                            
+                            # Collect all consecutive 2025 columns from this starting point
+                            for c in range(col_idx, df.shape[1]):
+                                cell_check = df.iloc[row_idx, c]
+                                # Include if it's a 2025 datetime or contains '2025' string
+                                if isinstance(cell_check, pd.Timestamp) and cell_check.year == 2025:
+                                    year_2025_cols.append(c)
+                                elif hasattr(cell_check, 'year') and cell_check.year == 2025:
+                                    year_2025_cols.append(c)
+                                elif str(cell_check) == '2025':  # Summary columns
+                                    year_2025_cols.append(c)
+                                else:
+                                    # Stop at first non-2025 column
+                                    break
+                            
+                            if year_2025_cols:
+                                logger.debug(f"Collected {len(year_2025_cols)} columns with 2025 data: {year_2025_cols}")
+                                return year_2025_cols
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Check if it contains '2025' text (like "Jan-2025")
+                if cell and isinstance(cell, str) and '2025' in cell and any(month in cell for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                    logger.debug(f"Found 2025 text format at column {col_idx}")
+                    # Collect consecutive month columns
+                    for c in range(col_idx, df.shape[1]):
+                        cell_check = df.iloc[row_idx, c]
+                        if cell_check and '2025' in str(cell_check):
+                            year_2025_cols.append(c)
+                        else:
+                            break
+                    if year_2025_cols:
+                        logger.debug(f"Collected {len(year_2025_cols)} columns with 2025 text: {year_2025_cols}")
+                        return year_2025_cols
+        
+        # Fallback: if we found nothing, assume old format (columns 79-93)
+        if not year_2025_cols:
+            logger.warning("Could not auto-detect 2025 columns, using default columns 79-93")
+            return list(range(79, 94))
+        
+        return year_2025_cols
+    
+    def _find_row_by_label(self, df: pd.DataFrame, search_terms: list, column: int = 1) -> Optional[int]:
+        """
+        Find a row by searching for keywords in a specific column (default column B = index 1)
+        Returns row index or None
+        """
+        for row_idx in range(len(df)):
+            cell = df.iloc[row_idx, column]
+            if pd.notna(cell):
+                cell_str = str(cell).lower()
+                if any(term.lower() in cell_str for term in search_terms):
+                    return row_idx
+        return None
     
     def _parse_cash_forecast_filename(self, filename: str) -> Tuple[str, str, str]:
         """
