@@ -157,7 +157,7 @@ def sharepoint_consent():
 
 @app.route('/logout')
 def logout():
-    """Log out user and clear session"""
+    """End user session (without revoking MS tokens)"""
     # Log user logout activity before clearing session
     try:
         from services.data_source_factory import get_property_data_source
@@ -169,28 +169,139 @@ def logout():
             db.log_activity(
                 user_email=user_email,
                 user_name=user_name,
-                activity_type='logout'
+                activity_type='session_end'
             )
     except Exception as e:
         # Don't break logout if logging fails
-        print(f"=== WARNING: Failed to log logout activity: {str(e)} ===")
+        print(f"=== WARNING: Failed to log session end activity: {str(e)} ===")
     
+    # Preserve MS tokens, cache, and user info before clearing session
+    token_cache = session.get('token_cache')
+    sharepoint_access_token = session.get('sharepoint_access_token')
+    refresh_token = session.get('refresh_token')
+    account = session.get('account')
+    user_info = session.get('user')  # Preserve user name/email
+    
+    # Clear all session data
     session.clear()
     
-    # Redirect to Azure AD logout to clear SSO session
-    tenant_id = os.environ.get('AZURE_AD_TENANT_ID')
-    logout_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/logout"
+    # Restore MS authentication data (keep tokens valid)
+    if token_cache:
+        session['token_cache'] = token_cache
+    if sharepoint_access_token:
+        session['sharepoint_access_token'] = sharepoint_access_token
+    if refresh_token:
+        session['refresh_token'] = refresh_token
+    if account:
+        session['account'] = account
+    if user_info:
+        session['user_info_preserved'] = user_info  # Store for session restart
     
-    # Add post_logout_redirect_uri to return to our app
-    post_logout_redirect = request.host_url
-    logout_url += f"?post_logout_redirect_uri={post_logout_redirect}"
+    # Mark that tokens exist but session ended
+    session['session_ended'] = True
     
-    return redirect(logout_url)
+    # Redirect to session ended page
+    return redirect(url_for('session_ended'))
+
+@app.route('/session/ended')
+def session_ended():
+    """Display session ended page"""
+    return render_template('session_ended.html')
+
+@app.route('/session/check')
+def session_check():
+    """Check if Microsoft tokens are still valid"""
+    try:
+        # Check if we have token data
+        if not session.get('token_cache') and not session.get('sharepoint_access_token'):
+            return jsonify({'valid': False, 'reason': 'no_tokens'})
+        
+        # Try to get a fresh token (will use refresh token if access token expired)
+        token = azure_auth.get_sharepoint_token()
+        
+        if token:
+            return jsonify({'valid': True})
+        else:
+            return jsonify({'valid': False, 'reason': 'token_refresh_failed'})
+    except Exception as e:
+        print(f"=== Session check error: {str(e)} ===")
+        return jsonify({'valid': False, 'reason': 'error', 'message': str(e)})
+
+@app.route('/session/start', methods=['POST'])
+def session_start():
+    """Start a new session (requires valid MS tokens)"""
+    try:
+        # Verify tokens are still valid
+        token = azure_auth.get_sharepoint_token()
+        
+        if not token:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        # Get preserved user info
+        user_info = session.get('user_info_preserved')
+        if not user_info:
+            return jsonify({'error': 'No user information available'}), 401
+        
+        # Re-establish session with user info
+        session['authenticated'] = True
+        session['user'] = user_info
+        
+        # Clean up preserved user info (moved to active session)
+        session.pop('user_info_preserved', None)
+        
+        # Clear access logged flag so next index access is logged
+        session.pop('session_access_logged', None)
+        
+        # Remove session_ended flag
+        session.pop('session_ended', None)
+        
+        # Log session restart
+        try:
+            from services.data_source_factory import get_property_data_source
+            db = get_property_data_source(access_token=token)
+            db.log_activity(
+                user_email=session['user']['email'],
+                user_name=session['user']['name'],
+                activity_type='session_start'
+            )
+        except Exception as e:
+            print(f"=== WARNING: Failed to log session start: {str(e)} ===")
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"=== Session start error: {str(e)} ===")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/')
 @login_required
 def index():
     """Main page with file upload form"""
+    # Validate that user info exists in session (for old sessions, force re-auth)
+    user_info = session.get('user')
+    if not user_info or not user_info.get('name') or not user_info.get('email') or \
+       user_info.get('name') == 'Unknown' or user_info.get('name') == 'Unknown User':
+        print(f"=== WARNING: Session has invalid user info ({user_info}), forcing re-authentication ===")
+        session.clear()
+        return redirect(url_for('login'))
+    
+    # Log first access of this session (if not already logged)
+    if not session.get('session_access_logged'):
+        try:
+            from services.data_source_factory import get_property_data_source
+            user_email = user_info.get('email', 'unknown')
+            user_name = user_info.get('name', 'unknown')
+            access_token = azure_auth.get_sharepoint_token()
+            if access_token:
+                db = get_property_data_source(access_token=access_token)
+                db.log_activity(
+                    user_email=user_email,
+                    user_name=user_name,
+                    activity_type='session_access'
+                )
+                session['session_access_logged'] = True
+        except Exception as e:
+            print(f"=== WARNING: Failed to log session access: {str(e)} ===")
+    
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
     data_source = os.environ.get('PROPERTY_DATA_SOURCE', 'database')
     print(f"DEBUG: model_name={model_name}, data_source={data_source}")
