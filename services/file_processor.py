@@ -268,10 +268,15 @@ class FileProcessor:
                 data = line_items['Total Operating Expenses']
                 result['expenses_month_actual'] = self._clean_number(data['month_actual'])
                 result['expenses_month_budget'] = self._clean_number(data['month_budget'])
-                result['expenses_month_variance_pct'] = self._clean_number(data['month_variance_%'].replace('%', ''))
+                # CRITICAL: Invert expense variance sign for correct interpretation
+                # PDF shows positive % when spending more (bad), but our logic expects:
+                # negative % = under budget = GOOD, positive % = over budget = BAD
+                # The PDF may show this inverted, so we flip it here
+                result['expenses_month_variance_pct'] = -self._clean_number(data['month_variance_%'].replace('%', ''))
                 result['expenses_ytd_actual'] = self._clean_number(data['ytd_actual'])
                 result['expenses_ytd_budget'] = self._clean_number(data['ytd_budget'])
-                result['expenses_ytd_variance_pct'] = self._clean_number(data['ytd_variance_%'].replace('%', ''))
+                result['expenses_ytd_variance_pct'] = -self._clean_number(data['ytd_variance_%'].replace('%', ''))
+
             
             if line_items['NET OPERATING INCOME']:
                 data = line_items['NET OPERATING INCOME']

@@ -39,12 +39,20 @@ class RecommendationEngine:
         current_liabilities = balance_sheet_data.get('current_liabilities', 0)
         monthly_debt_service = balance_sheet_data.get('monthly_debt_service', 0)
         
+        current_occupancy = cash_forecast_data.get('current_occupancy', 0)
+        projected_occupancy = cash_forecast_data.get('projected_occupancy', 0)
+        
         noi_ytd_variance_pct = income_statement_data.get('noi_ytd_variance_pct', 0)
         noi_month_variance_pct = income_statement_data.get('noi_month_variance_pct', 0)
         expenses_ytd_variance_pct = income_statement_data.get('expenses_ytd_variance_pct', 0)
         
         seasonal_factor = economic_analysis.get('seasonal_factor', {})
         enrollment_trend = economic_analysis.get('enrollment_trend', 'stable')
+        
+        # CRITICAL: Adjust projected FCF if occupancy gap exists
+        occupancy_adjusted_fcf, occupancy_adjustment_note = self._adjust_fcf_for_occupancy(
+            projected_fcf, current_occupancy, projected_occupancy
+        )
         
         # Calculate key ratios
         months_of_reserves = self._calculate_months_of_reserves(
@@ -53,9 +61,9 @@ class RecommendationEngine:
         
         working_capital = cash_balance - current_liabilities
         
-        # Determine decision
-        decision, amount, confidence = self._make_decision(
-            projected_fcf=projected_fcf,
+        # Determine decision using ADJUSTED cash flow
+        decision, amount, confidence, contribution_breakdown = self._make_decision(
+            projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
             current_fcf=current_fcf,
             cash_balance=cash_balance,
             months_of_reserves=months_of_reserves,
@@ -69,15 +77,22 @@ class RecommendationEngine:
         executive_summary = self._generate_executive_summary(
             decision=decision,
             amount=amount,
-            projected_fcf=projected_fcf,
+            projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
             cash_balance=cash_balance,
             months_of_reserves=months_of_reserves,
             noi_ytd_variance_pct=noi_ytd_variance_pct,
             noi_month_variance_pct=noi_month_variance_pct,
             expenses_ytd_variance_pct=expenses_ytd_variance_pct,
             seasonal_factor=seasonal_factor,
-            enrollment_trend=enrollment_trend
+            enrollment_trend=enrollment_trend,
+            working_capital=working_capital,
+            current_liabilities=current_liabilities,
+            contribution_breakdown=contribution_breakdown
         )
+        
+        # Add occupancy adjustment note to summary if significant
+        if occupancy_adjustment_note:
+            executive_summary.insert(2, occupancy_adjustment_note)  # Insert after decision and FCF bullets
         
         # Generate detailed rationale
         detailed_rationale = self._generate_detailed_rationale(
@@ -87,7 +102,8 @@ class RecommendationEngine:
             economic_analysis=economic_analysis,
             decision=decision,
             amount=amount,
-            months_of_reserves=months_of_reserves
+            months_of_reserves=months_of_reserves,
+            occupancy_adjustment_note=occupancy_adjustment_note
         )
         
         return {
@@ -98,8 +114,56 @@ class RecommendationEngine:
             'confidence': confidence,
             'property_name': cash_forecast_data.get('property_name', 'Unknown'),
             'analysis_month': cash_forecast_data.get('current_month', 'Unknown'),
-            'projected_month': cash_forecast_data.get('projected_month', 'Unknown')
+            'projected_month': cash_forecast_data.get('projected_month', 'Unknown'),
+            'occupancy_adjusted': occupancy_adjusted_fcf != projected_fcf
         }
+    
+    def _adjust_fcf_for_occupancy(self, projected_fcf: float, current_occupancy: float, 
+                                  projected_occupancy: float) -> tuple:
+        """
+        Adjust projected FCF if occupancy assumptions are unrealistic
+        
+        If there's a significant gap between current actual occupancy and the occupancy
+        assumed in the budget/projection, adjust the projected FCF proportionally.
+        
+        Example: If current is 90.2% but projection assumes 96%, that's a 6% gap.
+        Revenue projections may be overstated by approximately 6%.
+        
+        Args:
+            projected_fcf: The forecasted cash flow from the Excel projection
+            current_occupancy: Actual occupancy percentage (e.g., 90.2 = 90.2%)
+            projected_occupancy: Occupancy percentage assumed in budget (e.g., 96 = 96%)
+        
+        Returns:
+            tuple: (adjusted_fcf, warning_note)
+                - adjusted_fcf: Original FCF adjusted for occupancy gap
+                - warning_note: String explaining adjustment, or None if no adjustment needed
+        """
+        # Only adjust if we have valid occupancy data
+        if not current_occupancy or not projected_occupancy:
+            return projected_fcf, None
+        
+        # Calculate occupancy gap
+        occupancy_gap_pct = projected_occupancy - current_occupancy
+        
+        # Only flag if gap is significant (>3 percentage points)
+        if abs(occupancy_gap_pct) < 3.0:
+            return projected_fcf, None
+        
+        # Adjust projected FCF by occupancy ratio
+        # If projected assumes 96% but actual is 90.2%, multiply by (90.2/96) = 0.94
+        occupancy_ratio = current_occupancy / projected_occupancy
+        adjusted_fcf = projected_fcf * occupancy_ratio
+        adjustment_amount = adjusted_fcf - projected_fcf
+        
+        warning_note = (
+            f"⚠️ OCCUPANCY GAP DETECTED: Current occupancy is {current_occupancy:.1f}% "
+            f"but projection assumes {projected_occupancy:.1f}%. Adjusted projected FCF "
+            f"from ${projected_fcf:,.0f} to ${adjusted_fcf:,.0f} "
+            f"({adjustment_amount:+,.0f}) to reflect realistic revenue expectations."
+        )
+        
+        return adjusted_fcf, warning_note
     
     def _calculate_months_of_reserves(self, cash_balance: float, monthly_debt_service: float, 
                                      current_liabilities: float) -> float:
@@ -122,8 +186,62 @@ class RecommendationEngine:
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
         
         Returns:
-            Tuple[decision, amount, confidence]
+            Tuple[decision, amount, confidence, contribution_breakdown]
         """
+        
+        # CRITICAL CHECK: Working capital crisis (current liabilities > current assets)
+        # This indicates past-due obligations or structural cash flow problems
+        if working_capital < -50000:
+            # Severe working capital deficit - property is behind on payments
+            # Calculate contribution with transparent breakdown:
+            # 1. Multi-month projected deficits (not just one month)
+            # 2. Working capital restoration (to get current ratio to 1.0)
+            # 3. Operating reserve buffer (3-6 months)
+            
+            wc_deficit = abs(working_capital)
+            monthly_deficit = abs(projected_fcf) if projected_fcf < 0 else 0
+            
+            # CRITICAL: If NOI is underperforming or there's persistent deficit, project forward
+            # Don't just cover one month - cover until property stabilizes
+            if projected_fcf < 0:
+                # If property showing deficit, assume it continues for multiple months
+                # Use 3 months as minimum forward projection period
+                if noi_ytd_variance_pct < -5:
+                    # Underperforming - use 6 months forward projection
+                    months_forward = 6
+                    forward_reason = "Property underperforming budget by >5%, projecting 6 months of deficits"
+                elif abs(noi_ytd_variance_pct) < 5:
+                    # On budget but still showing deficit - structural issue, use 4 months
+                    months_forward = 4
+                    forward_reason = "Property on budget but showing structural deficit, projecting 4 months"
+                else:
+                    # Outperforming but still deficit - likely seasonal, use 3 months
+                    months_forward = 3
+                    forward_reason = "Property outperforming but showing deficit, projecting 3 months minimum"
+                
+                projected_multi_month_deficit = monthly_deficit * months_forward
+            else:
+                # No deficit projected, but working capital crisis exists from past issues
+                projected_multi_month_deficit = 0
+                months_forward = 0
+                forward_reason = "No projected deficit, but past working capital crisis requires restoration"
+            
+            # Operating reserve buffer: 3 months of debt service + monthly deficit
+            monthly_operating_cost = abs(projected_fcf) if projected_fcf < 0 else (current_fcf if current_fcf > 0 else 50000)
+            operating_reserve_buffer = monthly_operating_cost * 3
+            
+            # Need to cover: forward deficits + restore working capital + operating reserves
+            contribution_breakdown = {
+                'projected_deficit': monthly_deficit,
+                'months_forward': months_forward,
+                'forward_projected_deficit': projected_multi_month_deficit,
+                'working_capital_restoration': wc_deficit,
+                'operating_reserve_buffer': operating_reserve_buffer,
+                'forward_reason': forward_reason,
+                'total': projected_multi_month_deficit + wc_deficit + operating_reserve_buffer
+            }
+            
+            return ('CONTRIBUTE', contribution_breakdown['total'], 'LOW', contribution_breakdown)
         
         # Decision Logic Tree
         
@@ -134,24 +252,31 @@ class RecommendationEngine:
             # Minor deficit with strong reserves
             if deficit_amount < self.decision_thresholds['minor_deficit'] and \
                months_of_reserves > self.decision_thresholds['cash_reserve_months']:
-                return ('DO_NOTHING', None, 'HIGH')
+                return ('DO_NOTHING', None, 'HIGH', None)
             
             # Moderate deficit with adequate reserves
             elif deficit_amount < self.decision_thresholds['moderate_deficit'] and \
                  months_of_reserves > 4:
-                return ('DO_NOTHING', None, 'MEDIUM')
+                return ('DO_NOTHING', None, 'MEDIUM', None)
             
             # Major deficit or low reserves
             elif deficit_amount >= self.decision_thresholds['moderate_deficit'] or \
                  months_of_reserves < 3:
                 # Check if seasonal - if summer deficit, may not need contribution
                 if seasonal_factor.get('season') == 'Summer Session':
-                    return ('DO_NOTHING', None, 'MEDIUM')
+                    return ('DO_NOTHING', None, 'MEDIUM', None)
                 else:
-                    return ('CONTRIBUTE', deficit_amount * 1.1, 'MEDIUM')  # 110% of deficit as buffer
+                    # Calculate contribution with transparent breakdown
+                    contribution_breakdown = {
+                        'projected_deficit': deficit_amount,
+                        'safety_buffer': deficit_amount * 0.10,  # 10% buffer
+                        'working_capital_restoration': 0,  # No WC crisis in this path
+                        'total': deficit_amount * 1.1
+                    }
+                    return ('CONTRIBUTE', contribution_breakdown['total'], 'MEDIUM', contribution_breakdown)
             
             else:
-                return ('DO_NOTHING', None, 'MEDIUM')
+                return ('DO_NOTHING', None, 'MEDIUM', None)
         
         # Case 2: Projected surplus
         else:
@@ -170,23 +295,66 @@ class RecommendationEngine:
                 )
                 
                 if safe_distribution > 50000:
-                    return ('DISTRIBUTE', safe_distribution, 'HIGH')
+                    return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
             
             # Default: do nothing
-            return ('DO_NOTHING', None, 'HIGH')
+            return ('DO_NOTHING', None, 'MEDIUM', None)
     
     def _generate_executive_summary(self, decision: str, amount: float, projected_fcf: float,
                                    cash_balance: float, months_of_reserves: float,
                                    noi_ytd_variance_pct: float, noi_month_variance_pct: float,
                                    expenses_ytd_variance_pct: float, seasonal_factor: Dict,
-                                   enrollment_trend: str) -> List[str]:
+                                   enrollment_trend: str, working_capital: float = 0,
+                                   current_liabilities: float = 0, 
+                                   contribution_breakdown: Dict = None) -> List[str]:
         """Generate 5-7 executive summary bullet points supporting the decision"""
         
         bullets = []
         
+        # PRIORITY BULLET: Working capital crisis warning
+        if working_capital < -50000:
+            current_ratio = (cash_balance + 0) / max(current_liabilities, 1)  # Simplified: cash only as current assets
+            bullets.append(f"⚠️ **WORKING CAPITAL CRISIS**: Current liabilities (${current_liabilities:,.0f}) exceed current assets by ${abs(working_capital):,.0f}. Current ratio of {current_ratio:.2f}:1 indicates significant past-due obligations or structural cash flow problems. **FULL LIABILITY BREAKDOWN ANALYSIS REQUIRED BEFORE ANY CAPITAL DECISION**")
+        
         # Bullet 1: The decision
         if decision == 'CONTRIBUTE':
-            bullets.append(f"**RECOMMENDATION: CONTRIBUTE ${amount:,.0f}** to cover projected cash shortfall and maintain adequate reserves")
+            if contribution_breakdown:
+                # Show transparent breakdown of contribution calculation
+                deficit = contribution_breakdown.get('projected_deficit', 0)
+                months_forward = contribution_breakdown.get('months_forward', 0)
+                forward_deficit = contribution_breakdown.get('forward_projected_deficit', 0)
+                wc_restore = contribution_breakdown.get('working_capital_restoration', 0)
+                reserve_buffer = contribution_breakdown.get('operating_reserve_buffer', 0)
+                forward_reason = contribution_breakdown.get('forward_reason', '')
+                
+                # Build detailed breakdown
+                breakdown_parts = []
+                if months_forward > 0:
+                    breakdown_parts.append(f"{months_forward}-Month Projected Deficits: ${forward_deficit:,.0f}")
+                elif deficit > 0:
+                    breakdown_parts.append(f"1-Month Deficit: ${deficit:,.0f}")
+                
+                if wc_restore > 0:
+                    breakdown_parts.append(f"Working Capital Restoration: ${wc_restore:,.0f}")
+                
+                if reserve_buffer > 0:
+                    breakdown_parts.append(f"Operating Reserve Buffer (3mo): ${reserve_buffer:,.0f}")
+                
+                breakdown_text = " + ".join(breakdown_parts) + f" = **${amount:,.0f}**"
+                
+                if working_capital < -50000:
+                    if months_forward > 0:
+                        bullets.append(f"**FORWARD-LOOKING CONTRIBUTION REQUIRED: ${amount:,.0f}** ({breakdown_text}). Rationale: {forward_reason}. This covers immediate crisis plus forward exposure until property stabilizes.")
+                    else:
+                        bullets.append(f"**PRELIMINARY ESTIMATE: ${amount:,.0f} contribution MAY BE NEEDED** ({breakdown_text}) - However, actual requirement depends on liability breakdown and root cause analysis")
+                else:
+                    bullets.append(f"**RECOMMENDATION: CONTRIBUTE ${amount:,.0f}** to cover shortfall and maintain reserves. Breakdown: {breakdown_text}")
+            else:
+                # Fallback if no breakdown available
+                if working_capital < -50000:
+                    bullets.append(f"**PRELIMINARY ESTIMATE: ${amount:,.0f} contribution MAY BE NEEDED** - However, this is based on incomplete analysis. Actual requirement depends on liability breakdown and root cause of working capital deficit")
+                else:
+                    bullets.append(f"**RECOMMENDATION: CONTRIBUTE ${amount:,.0f}** to cover projected cash shortfall and maintain adequate reserves")
         elif decision == 'DISTRIBUTE':
             bullets.append(f"**RECOMMENDATION: DISTRIBUTE ${amount:,.0f}** to partners based on strong performance and excess cash position")
         else:
@@ -210,15 +378,20 @@ class RecommendationEngine:
         bullets.append(f"Cash reserves of ${cash_balance:,.0f} provide {months_of_reserves:.1f} months of coverage - {reserve_status} liquidity position")
         
         # Bullet 4: Operating performance (NOI)
+        # Variance % = (actual - budget) / budget * 100
+        # Positive variance = actual > budget = GOOD
+        # Negative variance = actual < budget = BAD
         if abs(noi_ytd_variance_pct) < 5:
             bullets.append(f"Net Operating Income tracking within 5% of budget YTD ({noi_ytd_variance_pct:+.1f}%), indicating reliable budget assumptions")
         elif noi_ytd_variance_pct > 5:
             bullets.append(f"Net Operating Income exceeding budget by {noi_ytd_variance_pct:.1f}% YTD, demonstrating strong property performance")
-        else:
+        else:  # noi_ytd_variance_pct < -5
             bullets.append(f"Net Operating Income underperforming budget by {abs(noi_ytd_variance_pct):.1f}% YTD, with recent month at {noi_month_variance_pct:+.1f}% - monitor trend closely")
         
         # Bullet 5: Expense management
-        if expenses_ytd_variance_pct < 0:
+        # For expenses: negative variance = under budget = GOOD (spending less)
+        # Positive variance = over budget = BAD (spending more)
+        if expenses_ytd_variance_pct < -5:
             bullets.append(f"Operating expenses running {abs(expenses_ytd_variance_pct):.1f}% under budget YTD, contributing to favorable cash position")
         elif expenses_ytd_variance_pct > 5:
             bullets.append(f"Operating expenses {expenses_ytd_variance_pct:.1f}% over budget YTD - expense control measures recommended")
@@ -256,7 +429,8 @@ class RecommendationEngine:
     
     def _generate_detailed_rationale(self, cash_forecast_data: Dict, income_statement_data: Dict,
                                     balance_sheet_data: Dict, economic_analysis: Dict,
-                                    decision: str, amount: float, months_of_reserves: float) -> Dict:
+                                    decision: str, amount: float, months_of_reserves: float,
+                                    occupancy_adjustment_note: str = None) -> Dict:
         """Generate detailed multi-page analysis"""
         
         return {
@@ -375,6 +549,7 @@ ECONOMIC & MARKET CONTEXT
         if income_data.get('noi_month_variance_pct', 0) < -10:
             risks.append("• Recent monthly NOI significantly below budget - investigate root causes")
         
+        # Expense variance: positive = over budget (BAD), negative = under budget (GOOD)
         if income_data.get('expenses_ytd_variance_pct', 0) > 10:
             risks.append("• Operating expenses significantly over budget - expense control measures needed")
         
@@ -530,16 +705,24 @@ Continue normal operations. Monitor monthly performance and reassess cash positi
             return f"The projected month shows positive free cash flow of ${projected_fcf:,.2f}, consistent with the current month's performance of ${current_fcf:,.2f}. This indicates stable cash generation capability."
     
     def _interpret_income_statement(self, data: Dict) -> str:
-        """Interpret income statement data"""
+        """Interpret income statement data
+        
+        Variance % = (actual - budget) / budget * 100
+        Positive = actual > budget (GOOD for revenue/NOI, BAD for expenses)
+        Negative = actual < budget (BAD for revenue/NOI, GOOD for expenses)
+        """
         noi_ytd_var = data.get('noi_ytd_variance_pct', 0)
         noi_month_var = data.get('noi_month_variance_pct', 0)
         
         if abs(noi_ytd_var) < 5 and abs(noi_month_var) < 5:
             return "Operating performance is tracking close to budget both YTD and for the recent month, indicating reliable budget assumptions and stable operations."
         elif noi_ytd_var > 5:
-            return f"Property is outperforming budget with NOI {noi_ytd_var:+.1f}% above plan YTD. However, recent month showed {noi_month_var:+.1f}% variance, suggesting potential trend change to monitor."
+            return f"Property is outperforming budget with NOI {noi_ytd_var:+.1f}% above plan YTD. Recent month showed {noi_month_var:+.1f}% variance, {'continuing strong performance' if noi_month_var > 0 else 'with some recent softness to monitor'}."
+        elif noi_ytd_var < -5:
+            return f"Property is underperforming budget with NOI at {noi_ytd_var:.1f}% of plan YTD. Recent month at {noi_month_var:+.1f}% indicates {'improvement trend' if noi_month_var > noi_ytd_var else 'continued weakness'}. Review revenue and expense drivers."
         else:
-            return f"Property is underperforming budget with NOI {noi_ytd_var:+.1f}% below plan YTD. Recent month at {noi_month_var:+.1f}% indicates {'improvement' if noi_month_var > noi_ytd_var else 'continued weakness'}. Review revenue and expense drivers."
+            # Between -5 and +5 but monthly variance is significant
+            return f"Operating performance tracking close to budget YTD ({noi_ytd_var:+.1f}%), though recent month shows {noi_month_var:+.1f}% variance requiring attention."
     
     def _interpret_balance_sheet(self, data: Dict, months_of_reserves: float) -> str:
         """Interpret balance sheet data"""
