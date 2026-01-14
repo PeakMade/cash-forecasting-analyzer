@@ -15,17 +15,11 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             line-height: 1.6;
             color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            padding: 20px;
         }
         
         .container {
-            max-width: 1200px;
-            margin: 0 auto;
             background: white;
-            border-radius: 10px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
             overflow: hidden;
         }
         
@@ -109,6 +103,126 @@
             color: #33c;
         }
         
+        .user-menu-container {
+            position: relative;
+        }
+        
+        .user-menu-button {
+            position: absolute;
+            top: 20px;
+            right: 40px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 8px 15px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: #333;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            transition: all 0.3s;
+        }
+        
+        .user-menu-button:hover {
+            background: #f8f8f8;
+            box-shadow: 0 3px 8px rgba(0,0,0,0.15);
+        }
+        
+        .user-menu-button::before {
+            content: '👤';
+            font-size: 1.1rem;
+        }
+        
+        .user-menu-button::after {
+            content: '▼';
+            font-size: 0.7rem;
+            margin-left: 4px;
+        }
+        
+        .user-dropdown {
+            position: absolute;
+            top: 60px;
+            right: 40px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            min-width: 280px;
+            display: none;
+            z-index: 1000;
+        }
+        
+        .user-dropdown.show {
+            display: block;
+        }
+        
+        .user-dropdown-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #666;
+            font-size: 0.85rem;
+        }
+        
+        .user-dropdown-header::before {
+            content: '👤';
+            font-size: 1.1rem;
+        }
+        
+        .user-dropdown-body {
+            padding: 20px;
+        }
+        
+        .user-info-row {
+            margin-bottom: 12px;
+        }
+        
+        .user-info-label {
+            font-size: 0.8rem;
+            color: #666;
+            margin-bottom: 4px;
+        }
+        
+        .user-info-value {
+            font-size: 0.9rem;
+            color: #333;
+        }
+        
+        .user-info-value a {
+            color: #1a73e8;
+            text-decoration: none;
+        }
+        
+        .end-session-btn {
+            width: 100%;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            padding: 10px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: background 0.3s;
+            text-decoration: none;
+            margin-top: 15px;
+        }
+        
+        .end-session-btn:hover {
+            background: #c82333;
+        }
+        
+        .end-session-btn::before {
+            content: '🚪';
+        }
+        
         {% block extra_styles %}{% endblock %}
     </style>
 </head>
@@ -124,24 +238,61 @@
             <div style="flex: 1; display: flex; justify-content: center; align-items: center; height: 80px;">
                 <h1 style="font-size: 22px; font-family: 'Open Sans', Arial, sans-serif; font-weight: 700; color: #fff; margin: 0; letter-spacing: 1px; text-shadow: 0 2px 6px rgba(0,0,0,0.12); line-height: 1.2; text-align: center;">{% block app_title %}💰 Cash Forecast Analyzer{% endblock %}</h1>
             </div>
-            <!-- Right section with User Info and Logo -->
-            <div style="flex: 1; display: flex; justify-content: flex-end; align-items: center; height: 80px; gap: 20px;">
-                {% if session.get('user') %}
-                <div style="display: flex; align-items: center; gap: 15px;">
-                    <span style="color: white; font-size: 0.9rem; opacity: 0.95;">{{ session['user']['name'] }}</span>
-                    <a href="{{ url_for('logout') }}" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.4); padding: 6px 14px; border-radius: 5px; text-decoration: none; font-size: 0.85rem; transition: all 0.3s;">End Session</a>
-                </div>
-                {% endif %}
+            <!-- Right section with Logo -->
+            <div style="flex: 1; display: flex; justify-content: flex-end; align-items: center; height: 80px;">
                 <img src="{{ url_for('static', filename='Redpoint_logo.png') }}" alt="Redpoint Logo" style="height: 32px; width: auto;">
             </div>
         </div>
     </header>
 
     <div class="container">
+        {% if session.get('user') %}
+        <div class="user-menu-container">
+            <button class="user-menu-button" id="userMenuButton">
+                {{ session['user']['name'] }}
+            </button>
+            <div class="user-dropdown" id="userDropdown">
+                <div class="user-dropdown-header">
+                    User Information
+                </div>
+                <div class="user-dropdown-body">
+                    <div class="user-info-row">
+                        <div class="user-info-label">Name:</div>
+                        <div class="user-info-value">{{ session['user']['name'] }}</div>
+                    </div>
+                    <div class="user-info-row">
+                        <div class="user-info-label">Email:</div>
+                        <div class="user-info-value"><a href="mailto:{{ session['user'].get('email', '') }}">{{ session['user'].get('email', '') }}</a></div>
+                    </div>
+                    <a href="{{ url_for('logout') }}" class="end-session-btn">End Session</a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
         <div class="content">
             {% block content %}{% endblock %}
         </div>
     </div>
+    
+    <script>
+        // User menu dropdown toggle
+        const userMenuButton = document.getElementById('userMenuButton');
+        const userDropdown = document.getElementById('userDropdown');
+        
+        if (userMenuButton && userDropdown) {
+            userMenuButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                userDropdown.classList.toggle('show');
+            });
+            
+            // Close dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!userDropdown.contains(e.target) && e.target !== userMenuButton) {
+                    userDropdown.classList.remove('show');
+                }
+            });
+        }
+    </script>
     
     {% block scripts %}{% endblock %}
 </body>

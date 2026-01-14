@@ -58,8 +58,9 @@
         font-weight: 600;
         cursor: pointer;
         transition: transform 0.2s;
-        width: 100%;
+        width: auto;
         margin-top: 20px;
+        display: inline-block;
     }
     
     .btn:hover {
@@ -130,8 +131,17 @@
         gap: 20px;
     }
     
+    .three-column-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 20px;
+    }
+    
     @media (max-width: 768px) {
         .two-column-grid {
+            grid-template-columns: 1fr;
+        }
+        .three-column-grid {
             grid-template-columns: 1fr;
         }
     }
@@ -176,37 +186,41 @@
         
         <div class="section-title">Required Files</div>
         
-        <div class="form-group">
-            <label for="cash_forecast">Cash Forecast Excel File *</label>
-            <div class="file-upload" id="cash_forecast_zone">
-                <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
-                <p>📊 Click to upload or drag file here</p>
-                <div class="help-text">Excel file containing "Cash Forecast" in the filename</div>
-                <div class="error-text" id="cash_forecast_error" style="display:none;"></div>
+        <div class="three-column-grid">
+            <div class="form-group">
+                <label for="cash_forecast">Cash Forecast Excel File *</label>
+                <div class="file-upload" id="cash_forecast_zone">
+                    <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
+                    <p>📊 Click to upload or drag file here</p>
+                    <div class="help-text">Excel file containing "Cash Forecast" in the filename</div>
+                    <div class="error-text" id="cash_forecast_error" style="display:none;"></div>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="income_statement">Comparative Income Statement (PDF) *</label>
+                <div class="file-upload" id="income_statement_zone">
+                    <input type="file" id="income_statement" name="income_statement" required accept=".pdf">
+                    <p>📋 Click to upload or drag PDF file here</p>
+                    <div class="help-text">PDF containing "Comparative Income Statement" in the filename</div>
+                    <div class="error-text" id="income_statement_error" style="display:none;"></div>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="balance_sheet">Balance Sheet (PDF) *</label>
+                <div class="file-upload" id="balance_sheet_zone">
+                    <input type="file" id="balance_sheet" name="balance_sheet" required accept=".pdf">
+                    <p>📈 Click to upload or drag PDF file here</p>
+                    <div class="help-text">PDF containing "Balance Sheet" in the filename</div>
+                    <div class="error-text" id="balance_sheet_error" style="display:none;"></div>
+                </div>
             </div>
         </div>
         
-        <div class="form-group">
-            <label for="income_statement">Comparative Income Statement (PDF) *</label>
-            <div class="file-upload" id="income_statement_zone">
-                <input type="file" id="income_statement" name="income_statement" required accept=".pdf">
-                <p>📋 Click to upload or drag PDF file here</p>
-                <div class="help-text">PDF containing "Comparative Income Statement" in the filename</div>
-                <div class="error-text" id="income_statement_error" style="display:none;"></div>
-            </div>
+        <div style="text-align: center;">
+            <button type="submit" class="btn">Analyze Cash Forecast</button>
         </div>
-        
-        <div class="form-group">
-            <label for="balance_sheet">Balance Sheet (PDF) *</label>
-            <div class="file-upload" id="balance_sheet_zone">
-                <input type="file" id="balance_sheet" name="balance_sheet" required accept=".pdf">
-                <p>📈 Click to upload or drag PDF file here</p>
-                <div class="help-text">PDF containing "Balance Sheet" in the filename</div>
-                <div class="error-text" id="balance_sheet_error" style="display:none;"></div>
-            </div>
-        </div>
-        
-        <button type="submit" class="btn">Analyze Cash Forecast</button>
         <div style="text-align: center; margin-top: 10px; font-size: 0.75rem; color: #999;">
             Powered by OpenAI {{ model_name | upper }} | Data: {{ data_source | upper }}
         </div>
