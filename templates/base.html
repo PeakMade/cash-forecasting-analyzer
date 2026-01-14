@@ -276,21 +276,26 @@
     
     <script>
         // User menu dropdown toggle
-        const userMenuButton = document.getElementById('userMenuButton');
-        const userDropdown = document.getElementById('userDropdown');
+        var userMenuButton = document.getElementById('userMenuButton');
+        var userDropdown = document.getElementById('userDropdown');
         
         if (userMenuButton && userDropdown) {
-            userMenuButton.addEventListener('click', (e) => {
-                e.stopPropagation();
-                userDropdown.classList.toggle('show');
-            });
-            
-            // Close dropdown when clicking outside
-            document.addEventListener('click', (e) => {
-                if (!userDropdown.contains(e.target) && e.target !== userMenuButton) {
-                    userDropdown.classList.remove('show');
-                }
-            });
+            // Check if listener already attached to THIS specific element
+            if (!userMenuButton.hasAttribute('data-dropdown-initialized')) {
+                userMenuButton.setAttribute('data-dropdown-initialized', 'true');
+                
+                userMenuButton.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    userDropdown.classList.toggle('show');
+                });
+                
+                // Close dropdown when clicking outside
+                document.addEventListener('click', function(e) {
+                    if (!userDropdown.contains(e.target) && e.target !== userMenuButton) {
+                        userDropdown.classList.remove('show');
+                    }
+                });
+            }
         }
     </script>
     
