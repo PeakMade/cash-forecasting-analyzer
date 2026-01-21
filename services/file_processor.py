@@ -132,13 +132,13 @@ class FileProcessor:
             # Month row is typically one row after status row
             month_row_idx = status_row_idx + 1 if status_row_idx is not None else None
             
-            # Find occupancy rows
-            budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'])
-            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'])
+            # Find occupancy rows (search column 0 = column A)
+            budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=0)
+            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=0)
             
-            # Find FCF and distribution rows
-            fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'])
-            dist_row_idx = self._find_row_by_label(df, ['Distributions', 'Contribution', 'ACTUAL (Distributions)'])
+            # Find FCF and distribution rows (search column 0 = column A)
+            fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=0)
+            dist_row_idx = self._find_row_by_label(df, ['Distributions', 'Contribution', 'ACTUAL (Distributions)'], column=0)
             
             logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, Dist:{dist_row_idx}")
             
