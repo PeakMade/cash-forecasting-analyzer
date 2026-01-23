@@ -30,12 +30,17 @@
     
     .file-upload {
         background: #f8f9fa;
-        padding: 20px;
+        padding: 12px;
         border-radius: 5px;
         border: 2px dashed #d0d0d0;
         text-align: center;
         cursor: pointer;
         transition: all 0.3s;
+    }
+    
+    .file-upload p {
+        margin: 8px 0;
+        font-size: 0.9rem;
     }
     
     .file-upload:hover {
@@ -137,6 +142,39 @@
         gap: 20px;
     }
     
+    .main-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+        margin-bottom: 30px;
+    }
+    
+    .property-info-section {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .file-uploads-section {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .file-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        margin-top: 10px;
+    }
+    
+    .file-grid .form-group {
+        margin-bottom: 0;
+    }
+    
+    .file-grid .form-group:last-child {
+        grid-column: 1 / -1;
+        max-width: 50%;
+    }
+    
     @media (max-width: 768px) {
         .two-column-grid {
             grid-template-columns: 1fr;
@@ -144,76 +182,93 @@
         .three-column-grid {
             grid-template-columns: 1fr;
         }
+        .main-container {
+            grid-template-columns: 1fr;
+        }
+        .file-grid {
+            grid-template-columns: 1fr;
+        }
+        .file-grid .form-group:last-child {
+            max-width: 100%;
+        }
     }
 </style>
 {% endblock %}
 
 {% block content %}
 <div id="upload-form">
-    <h2>Upload Cash Forecast Analysis Files</h2>
-    <p class="help-text" style="margin-bottom: 30px;">
+    <!--<h2>Upload Cash Forecast Analysis Files</h2>-->
+    <p class="help-text" style="margin-bottom: 30px; font-size: 1.1rem; font-weight: bold;">
         Upload the three required files and provide property information to begin analysis.
     </p>
     
     <form id="analysisForm" enctype="multipart/form-data">
-        <div class="section-title">Property Information</div>
-        
-        <div class="two-column-grid">
-            <div class="form-group">
-                <label for="property_name">Property Name <span style="color: red;">*</span></label>
-                <select id="property_name" name="property_name" required style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 5px; font-size: 1rem;">
-                    <option value="">-- Select a Property --</option>
-                </select>
-                <div class="help-text" id="loading-properties">Loading properties...</div>
-            </div>
-            
-            <div class="form-group">
-                <label for="property_address">Property Address <span style="color: red;">*</span></label>
-                <input type="text" id="property_address" name="property_address" required placeholder="e.g., 123 University Blvd, College Town, ST">
-            </div>
-            
-            <div class="form-group">
-                <label for="zip_code">ZIP Code <span style="color: red;">*</span></label>
-                <input type="text" id="zip_code" name="zip_code" required pattern="[0-9]{5}(-[0-9]{4})?" placeholder="e.g., 12345 or 12345-6789">
-                <div class="help-text">5-digit or ZIP+4 format</div>
-            </div>
-            
-            <div class="form-group">
-                <label for="university">Associated University <span style="color: red;">*</span></label>
-                <input type="text" id="university" name="university" required placeholder="e.g., State University">
-            </div>
-        </div>
-        
-        <div class="section-title">Required Files</div>
-        
-        <div class="three-column-grid">
-            <div class="form-group">
-                <label for="cash_forecast">Cash Forecast Excel File *</label>
-                <div class="file-upload" id="cash_forecast_zone">
-                    <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
-                    <p>📊 Click to upload or drag file here</p>
-                    <div class="help-text">Excel file containing "Cash Forecast" in the filename</div>
-                    <div class="error-text" id="cash_forecast_error" style="display:none;"></div>
+        <div class="main-container">
+            <!-- Left column: Property Information -->
+            <div class="property-info-section">
+                <div class="section-title">Property Information</div>
+                
+                <div class="two-column-grid">
+                    <div class="form-group">
+                        <label for="property_name">Property Name <span style="color: red;">*</span></label>
+                        <select id="property_name" name="property_name" required style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 5px; font-size: 1rem;">
+                            <option value="">-- Select a Property --</option>
+                        </select>
+                        <div class="help-text" id="loading-properties">Loading properties...</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="property_address">Property Address <span style="color: red;">*</span></label>
+                        <input type="text" id="property_address" name="property_address" required placeholder="e.g., 123 University Blvd, College Town, ST">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="zip_code">ZIP Code <span style="color: red;">*</span></label>
+                        <input type="text" id="zip_code" name="zip_code" required pattern="[0-9]{5}(-[0-9]{4})?" placeholder="e.g., 12345 or 12345-6789">
+                        <div class="help-text">5-digit or ZIP+4 format</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="university">Associated University <span style="color: red;">*</span></label>
+                        <input type="text" id="university" name="university" required placeholder="e.g., State University">
+                    </div>
                 </div>
             </div>
             
-            <div class="form-group">
-                <label for="income_statement">Comparative Income Statement (PDF) *</label>
-                <div class="file-upload" id="income_statement_zone">
-                    <input type="file" id="income_statement" name="income_statement" required accept=".pdf" style="display:none;">
-                    <p>📋 Click to upload or drag PDF file here</p>
-                    <div class="help-text">PDF containing "Comparative Income Statement" in the filename</div>
-                    <div class="error-text" id="income_statement_error" style="display:none;"></div>
-                </div>
-            </div>
-            
-            <div class="form-group">
-                <label for="balance_sheet">Balance Sheet (PDF) *</label>
-                <div class="file-upload" id="balance_sheet_zone">
-                    <input type="file" id="balance_sheet" name="balance_sheet" required accept=".pdf" style="display:none;">
-                    <p>📈 Click to upload or drag PDF file here</p>
-                    <div class="help-text">PDF containing "Balance Sheet" in the filename</div>
-                    <div class="error-text" id="balance_sheet_error" style="display:none;"></div>
+            <!-- Right column: File Uploads -->
+            <div class="file-uploads-section">
+                <div class="section-title">Required Files</div>
+                
+                <div class="file-grid">
+                    <div class="form-group">
+                        <label for="cash_forecast">Cash Forecast Excel File *</label>
+                        <div class="file-upload" id="cash_forecast_zone">
+                            <input type="file" id="cash_forecast" name="cash_forecast" required accept=".xlsx,.xls" style="display:none;">
+                            <p>📊 Click to upload or drag file here</p>
+                            <div class="help-text">Excel file containing "Cash Forecast" in the filename</div>
+                            <div class="error-text" id="cash_forecast_error" style="display:none;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="income_statement">Comparative Income Statement (PDF) *</label>
+                        <div class="file-upload" id="income_statement_zone">
+                            <input type="file" id="income_statement" name="income_statement" required accept=".pdf" style="display:none;">
+                            <p>📋 Click to upload or drag PDF file here</p>
+                            <div class="help-text">PDF containing "Comparative Income Statement" in the filename</div>
+                            <div class="error-text" id="income_statement_error" style="display:none;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="balance_sheet">Balance Sheet (PDF) *</label>
+                        <div class="file-upload" id="balance_sheet_zone">
+                            <input type="file" id="balance_sheet" name="balance_sheet" required accept=".pdf" style="display:none;">
+                            <p>📈 Click to upload or drag PDF file here</p>
+                            <div class="help-text">PDF containing "Balance Sheet" in the filename</div>
+                            <div class="error-text" id="balance_sheet_error" style="display:none;"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
