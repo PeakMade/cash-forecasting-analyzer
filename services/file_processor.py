@@ -90,7 +90,7 @@ class FileProcessor:
             }
             
         except Exception as e:
-            logger.error(f"Error processing files: {str(e)}")
+            logger.error(f"Error processing files: {str(e)}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e),
@@ -155,19 +155,22 @@ class FileProcessor:
             logger.debug(f"FCF row: {fcf_row}")
             logger.debug(f"Distributions row: {distributions_row}")
             
-            # Find current month (most recent "Actual" = LAST actual column) and next month (first "Budget")
+            # Find current month (most recent "Actual" = LAST actual column) and next 6 months (Budget months)
             current_month_idx = None
-            next_month_idx = None
+            budget_month_indices = []  # Collect multiple budget months
             
             for i, status in enumerate(status_row):
                 if isinstance(status, str):
                     if 'actual' in status.lower():
                         current_month_idx = i  # Keep updating to get the LAST actual month
-                    elif 'budget' in status.lower() and current_month_idx is not None and next_month_idx is None:
-                        next_month_idx = i
-                        break
+                    elif 'budget' in status.lower() and current_month_idx is not None:
+                        budget_month_indices.append(i)
+                        if len(budget_month_indices) >= 6:  # Collect up to 6 budget months
+                            break
             
+            next_month_idx = budget_month_indices[0] if budget_month_indices else None
             logger.debug(f"Current month index: {current_month_idx}, Next month index: {next_month_idx}")
+            logger.debug(f"Budget month indices (next 6 months): {budget_month_indices}")
             
             # Extract data for current and projected months
             # Convert datetime objects to strings in "Month YYYY" format
@@ -208,6 +211,25 @@ class FileProcessor:
             logger.info(f"Occupancy - Current: {current_occupancy:.1f}%, Projected: {projected_occupancy:.1f}%")
             logger.info(f"Current distributions: ${current_distributions:,.2f}")
             
+            # Extract 6-month projection data
+            projected_months = []
+            for idx in budget_month_indices:
+                month_date = month_row[idx]
+                month_name = month_date.strftime('%B %Y') if isinstance(month_date, (pd.Timestamp, datetime)) else str(month_date)
+                
+                month_fcf = float(fcf_row[idx]) if pd.notna(fcf_row[idx]) else 0.0
+                month_occupancy = float(budgeted_occ_row[idx]) * 100 if pd.notna(budgeted_occ_row[idx]) else 0.0
+                
+                projected_months.append({
+                    'month': month_name,
+                    'fcf': month_fcf,
+                    'occupancy': month_occupancy
+                })
+            
+            logger.info(f"Extracted {len(projected_months)} months of projections")
+            for i, proj in enumerate(projected_months[:3], 1):  # Log first 3 months
+                logger.debug(f"  Month {i}: {proj['month']} - FCF: ${proj['fcf']:,.2f}, Occ: {proj['occupancy']:.1f}%")
+            
             result = {
                 'status': 'success',
                 'property_name': property_name,
@@ -219,6 +241,7 @@ class FileProcessor:
                 'current_occupancy': current_occupancy,
                 'projected_occupancy': projected_occupancy,
                 'current_distributions': current_distributions,
+                'projected_months': projected_months,  # NEW: 6-month projection data
                 'file_path': file_path
             }
             
@@ -440,63 +463,87 @@ class FileProcessor:
     
     def _find_2025_columns(self, df: pd.DataFrame) -> list:
         """
-        Auto-detect which columns contain 2025 data
+        Auto-detect which columns contain month data (current and future years)
         Returns list of column indices
+        NOTE: Method name kept as _find_2025_columns for compatibility, but now finds all month columns
         """
-        # Search for columns containing 2025 dates or '2025' text in first 10 rows
-        year_2025_cols = []
+        # Search for columns containing dates in first 10 rows
+        month_cols = []
+        first_date_col = None
         
         for col_idx in range(df.shape[1]):
             for row_idx in range(min(10, len(df))):
                 cell = df.iloc[row_idx, col_idx]
                 
-                # Check if it's a datetime in 2025
+                # Check if it's a datetime (any year)
                 if isinstance(cell, pd.Timestamp) or hasattr(cell, 'year'):
                     try:
-                        if cell.year == 2025:
-                            # Found a 2025 column, collect consecutive months
-                            logger.debug(f"Found 2025 data starting at column {col_idx}, row {row_idx}")
+                        # Found first date column, now collect ALL date columns from here
+                        if first_date_col is None:
+                            first_date_col = col_idx
+                            logger.debug(f"Found first date column at {col_idx}, row {row_idx}: {cell}")
+                        
+                        # Collect ALL columns from first date onwards, skipping non-dates but continuing to look
+                        # This handles: [Aug-2025, Sep-2025, ..., Dec-2025, YTD 2025, Budget 2025, blank, Jan-2026, ...]
+                        consecutive_non_date = 0
+                        for c in range(first_date_col, df.shape[1]):
+                            cell_check = df.iloc[row_idx, c]
                             
-                            # Collect all consecutive 2025 columns from this starting point
-                            for c in range(col_idx, df.shape[1]):
-                                cell_check = df.iloc[row_idx, c]
-                                # Include if it's a 2025 datetime or contains '2025' string
-                                if isinstance(cell_check, pd.Timestamp) and cell_check.year == 2025:
-                                    year_2025_cols.append(c)
-                                elif hasattr(cell_check, 'year') and cell_check.year == 2025:
-                                    year_2025_cols.append(c)
-                                elif str(cell_check) == '2025':  # Summary columns
-                                    year_2025_cols.append(c)
-                                else:
-                                    # Stop at first non-2025 column
-                                    break
+                            # Include if it's a datetime (any year)
+                            if isinstance(cell_check, pd.Timestamp) or hasattr(cell_check, 'year'):
+                                try:
+                                    _ = cell_check.year  # Verify it has a year attribute
+                                    if c not in month_cols:
+                                        month_cols.append(c)
+                                    consecutive_non_date = 0  # Reset counter
+                                except (AttributeError, TypeError):
+                                    consecutive_non_date += 1
+                            else:
+                                consecutive_non_date += 1
                             
-                            if year_2025_cols:
-                                logger.debug(f"Collected {len(year_2025_cols)} columns with 2025 data: {year_2025_cols}")
-                                return year_2025_cols
+                            # Stop if we've hit 5 consecutive non-date columns (end of data)
+                            if consecutive_non_date >= 5:
+                                break
+                        
+                        if month_cols:
+                            logger.debug(f"Collected {len(month_cols)} month columns: {month_cols}")
+                            return month_cols
                     except (AttributeError, TypeError):
                         pass
                 
-                # Check if it contains '2025' text (like "Jan-2025")
-                if cell and isinstance(cell, str) and '2025' in cell and any(month in cell for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                    logger.debug(f"Found 2025 text format at column {col_idx}")
-                    # Collect consecutive month columns
-                    for c in range(col_idx, df.shape[1]):
-                        cell_check = df.iloc[row_idx, c]
-                        if cell_check and '2025' in str(cell_check):
-                            year_2025_cols.append(c)
-                        else:
-                            break
-                    if year_2025_cols:
-                        logger.debug(f"Collected {len(year_2025_cols)} columns with 2025 text: {year_2025_cols}")
-                        return year_2025_cols
+                # Check if it contains year text (like "Jan-2025", "Jan-2026")
+                if cell and isinstance(cell, str) and any(month in cell for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                    # Extract year from the cell
+                    import re
+                    year_match = re.search(r'20\d{2}', str(cell))
+                    if year_match:
+                        logger.debug(f"Found text format date at column {col_idx}: {cell}")
+                        # Collect consecutive month columns (any year)
+                        text_format_cols = []
+                        consecutive_non_date = 0
+                        for c in range(col_idx, df.shape[1]):
+                            cell_check = df.iloc[row_idx, c]
+                            # Check if it looks like a month column
+                            if cell_check and isinstance(cell_check, str) and any(month in str(cell_check) for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                                text_format_cols.append(c)
+                                consecutive_non_date = 0
+                            else:
+                                consecutive_non_date += 1
+                            
+                            # Stop after 5 consecutive non-date columns
+                            if consecutive_non_date >= 5:
+                                break
+                        
+                        if text_format_cols:
+                            logger.debug(f"Collected {len(text_format_cols)} text format month columns: {text_format_cols}")
+                            return text_format_cols
         
         # Fallback: if we found nothing, assume old format (columns 79-93)
-        if not year_2025_cols:
-            logger.warning("Could not auto-detect 2025 columns, using default columns 79-93")
+        if not month_cols:
+            logger.warning("Could not auto-detect month columns, using default columns 79-93")
             return list(range(79, 94))
         
-        return year_2025_cols
+        return month_cols
     
     def _find_row_by_label(self, df: pd.DataFrame, search_terms: list, column: int = 1) -> Optional[int]:
         """

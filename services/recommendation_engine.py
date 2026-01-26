@@ -42,6 +42,10 @@ class RecommendationEngine:
         current_occupancy = cash_forecast_data.get('current_occupancy', 0)
         projected_occupancy = cash_forecast_data.get('projected_occupancy', 0)
         
+        # NEW: Extract and analyze multi-month projection
+        projected_months = cash_forecast_data.get('projected_months', [])
+        multi_month_analysis = self._analyze_multi_month_projection(projected_months) if projected_months else None
+        
         noi_ytd_variance_pct = income_statement_data.get('noi_ytd_variance_pct', 0)
         noi_month_variance_pct = income_statement_data.get('noi_month_variance_pct', 0)
         expenses_ytd_variance_pct = income_statement_data.get('expenses_ytd_variance_pct', 0)
@@ -61,7 +65,7 @@ class RecommendationEngine:
         
         working_capital = cash_balance - current_liabilities
         
-        # Determine decision using ADJUSTED cash flow
+        # Determine decision using ADJUSTED cash flow and multi-month analysis
         decision, amount, confidence, contribution_breakdown = self._make_decision(
             projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
             current_fcf=current_fcf,
@@ -69,8 +73,11 @@ class RecommendationEngine:
             months_of_reserves=months_of_reserves,
             working_capital=working_capital,
             noi_ytd_variance_pct=noi_ytd_variance_pct,
+            monthly_debt_service=monthly_debt_service,
+            current_liabilities=current_liabilities,
             seasonal_factor=seasonal_factor,
-            enrollment_trend=enrollment_trend
+            enrollment_trend=enrollment_trend,
+            multi_month_analysis=multi_month_analysis  # NEW: Pass multi-month data
         )
         
         # Generate executive summary bullets
@@ -115,7 +122,8 @@ class RecommendationEngine:
             'property_name': cash_forecast_data.get('property_name', 'Unknown'),
             'analysis_month': cash_forecast_data.get('current_month', 'Unknown'),
             'projected_month': cash_forecast_data.get('projected_month', 'Unknown'),
-            'occupancy_adjusted': occupancy_adjusted_fcf != projected_fcf
+            'occupancy_adjusted': occupancy_adjusted_fcf != projected_fcf,
+            'multi_month_analysis': multi_month_analysis  # NEW: Include 6-month analysis in output
         }
     
     def _adjust_fcf_for_occupancy(self, projected_fcf: float, current_occupancy: float, 
@@ -152,18 +160,119 @@ class RecommendationEngine:
         
         # Adjust projected FCF by occupancy ratio
         # If projected assumes 96% but actual is 90.2%, multiply by (90.2/96) = 0.94
-        occupancy_ratio = current_occupancy / projected_occupancy
-        adjusted_fcf = projected_fcf * occupancy_ratio
-        adjustment_amount = adjusted_fcf - projected_fcf
+        if projected_occupancy > 0:
+            occupancy_ratio = current_occupancy / projected_occupancy
+            adjusted_fcf = projected_fcf * occupancy_ratio
+            adjustment_amount = adjusted_fcf - projected_fcf
+            
+            warning_note = (
+                f"⚠️ OCCUPANCY GAP DETECTED: Current occupancy is {current_occupancy:.1f}% "
+                f"but projection assumes {projected_occupancy:.1f}%. Adjusted projected FCF "
+                f"from ${projected_fcf:,.0f} to ${adjusted_fcf:,.0f} "
+                f"({adjustment_amount:+,.0f}) to reflect realistic revenue expectations."
+            )
+            
+            return adjusted_fcf, warning_note
+        else:
+            # Can't adjust if projected occupancy is 0
+            return projected_fcf, None
+    
+    def _analyze_multi_month_projection(self, projected_months: List[Dict]) -> Dict:
+        """
+        Analyze 6-month cash flow projection
         
-        warning_note = (
-            f"⚠️ OCCUPANCY GAP DETECTED: Current occupancy is {current_occupancy:.1f}% "
-            f"but projection assumes {projected_occupancy:.1f}%. Adjusted projected FCF "
-            f"from ${projected_fcf:,.0f} to ${adjusted_fcf:,.0f} "
-            f"({adjustment_amount:+,.0f}) to reflect realistic revenue expectations."
-        )
+        Returns:
+            dict: {
+                'total_fcf': Total cumulative FCF over period,
+                'average_fcf': Average monthly FCF,
+                'lowest_month': {'month': str, 'fcf': float},
+                'highest_month': {'month': str, 'fcf': float},
+                'positive_months': int,
+                'negative_months': int,
+                'trend': 'INCREASING' | 'DECREASING' | 'STABLE',
+                'all_positive': bool
+            }
+        """
+        if not projected_months:
+            return None
         
-        return adjusted_fcf, warning_note
+        total_fcf = sum(m['fcf'] for m in projected_months)
+        average_fcf = total_fcf / len(projected_months) if projected_months else 0
+        
+        # Find lowest and highest months
+        lowest_month = min(projected_months, key=lambda x: x['fcf'])
+        highest_month = max(projected_months, key=lambda x: x['fcf'])
+        
+        # Count positive/negative months
+        positive_months = sum(1 for m in projected_months if m['fcf'] > 0)
+        negative_months = sum(1 for m in projected_months if m['fcf'] < 0)
+        
+        # Determine trend (compare first half to second half)
+        if len(projected_months) >= 4:
+            half_point = len(projected_months) // 2
+            if half_point == 0:
+                trend = 'STABLE'
+            else:
+                first_half = projected_months[:half_point]
+                second_half = projected_months[half_point:]
+                
+                first_half_sum = sum(m['fcf'] for m in first_half)
+                second_half_sum = sum(m['fcf'] for m in second_half)
+                
+                first_half_avg = first_half_sum / len(first_half) if len(first_half) > 0 else 0
+                second_half_avg = second_half_sum / len(second_half) if len(second_half) > 0 else 0
+                
+                # Calculate percentage difference, handling zero values
+                if first_half_avg != 0:
+                    diff_pct = ((second_half_avg - first_half_avg) / abs(first_half_avg)) * 100
+                else:
+                    diff_pct = 0
+                
+                if diff_pct > 10:
+                    trend = 'INCREASING'
+                elif diff_pct < -10:
+                    trend = 'DECREASING'
+                else:
+                    trend = 'STABLE'
+        else:
+            trend = 'STABLE'
+        
+        return {
+            'total_fcf': total_fcf,
+            'average_fcf': average_fcf,
+            'lowest_month': {'month': lowest_month['month'], 'fcf': lowest_month['fcf']},
+            'highest_month': {'month': highest_month['month'], 'fcf': highest_month['fcf']},
+            'positive_months': positive_months,
+            'negative_months': negative_months,
+            'trend': trend,
+            'all_positive': negative_months == 0,
+            'months_analyzed': len(projected_months)
+        }
+    
+    def _calculate_reserves_after_distribution(self, balance_data: Dict, distribution_amount: float) -> float:
+        """
+        Calculate months of reserves remaining after distribution
+        Handles case where monthly_debt_service is 0
+        """
+        current_reserves = balance_data.get('months_of_reserves', 0)
+        cash_balance = balance_data.get('cash_balance', 0)
+        monthly_debt_service = balance_data.get('monthly_debt_service', 0)
+        current_liabilities = balance_data.get('current_liabilities', 0)
+        
+        # Calculate new cash balance after distribution
+        new_cash_balance = cash_balance - distribution_amount
+        
+        # Recalculate reserves with new cash balance
+        if monthly_debt_service > 0:
+            monthly_needs = monthly_debt_service + (current_liabilities * 0.1)
+        else:
+            # If no debt service, use simplified calculation based on current liabilities
+            monthly_needs = current_liabilities * 0.1 if current_liabilities > 0 else 42000  # fallback estimate
+        
+        if monthly_needs > 0:
+            return new_cash_balance / monthly_needs
+        else:
+            return 999  # Very safe position
     
     def _calculate_months_of_reserves(self, cash_balance: float, monthly_debt_service: float, 
                                      current_liabilities: float) -> float:
@@ -181,9 +290,11 @@ class RecommendationEngine:
     
     def _make_decision(self, projected_fcf: float, current_fcf: float, cash_balance: float,
                       months_of_reserves: float, working_capital: float, noi_ytd_variance_pct: float,
-                      seasonal_factor: Dict, enrollment_trend: str) -> Tuple[str, float, str]:
+                      seasonal_factor: Dict, enrollment_trend: str, multi_month_analysis: Dict = None,
+                      monthly_debt_service: float = 0, current_liabilities: float = 0) -> Tuple[str, float, str]:
         """
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
+        Uses multi-month projection data when available for more robust analysis
         
         Returns:
             Tuple[decision, amount, confidence, contribution_breakdown]
@@ -282,23 +393,90 @@ class RecommendationEngine:
         else:
             surplus_amount = projected_fcf
             
-            # Only recommend distribution if surplus is substantial and reserves are strong
-            if surplus_amount > self.decision_thresholds['distribution_min'] and \
-               months_of_reserves > self.decision_thresholds['cash_reserve_months'] * 1.5 and \
-               noi_ytd_variance_pct > 0:  # Performing above budget
+            # NEW: Use multi-month analysis for better distribution decisions
+            if multi_month_analysis:
+                # Multi-month data available - use it for robust analysis
+                avg_fcf = multi_month_analysis['average_fcf']
+                all_positive = multi_month_analysis['all_positive']
+                total_fcf = multi_month_analysis['total_fcf']
+                lowest_month_fcf = multi_month_analysis['lowest_month']['fcf']
+                months_analyzed = multi_month_analysis['months_analyzed']
                 
-                # Calculate safe distribution amount (leave 6 months reserves)
-                safe_distribution = min(
-                    surplus_amount,
-                    working_capital - (self.decision_thresholds['cash_reserve_months'] * 
-                                      (cash_balance / months_of_reserves))
-                )
+                # Recommend distribution if:
+                # 1. ALL projected months are positive
+                # 2. Average FCF > $100k
+                # 3. Even lowest month is positive
+                # 4. Reserves are strong (>10 months currently)
                 
-                if safe_distribution > 50000:
-                    return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
+                if all_positive and avg_fcf > self.decision_thresholds['distribution_min'] and \
+                   lowest_month_fcf > 0 and months_of_reserves > 10:
+                    
+                    # Calculate safe distribution:
+                    # Keep enough cash to maintain minimum 6 months of reserves AFTER distribution
+                    
+                    # Calculate monthly operating needs
+                    if monthly_debt_service > 0:
+                        monthly_operating_needs = monthly_debt_service + (current_liabilities * 0.1)
+                    elif current_liabilities > 0:
+                        monthly_operating_needs = current_liabilities * 0.1
+                    else:
+                        monthly_operating_needs = 50000  # Default estimate
+                    
+                    # Required reserve: keep 6 months minimum
+                    required_reserve = monthly_operating_needs * 6
+                    
+                    # Maximum safe distribution: current cash - required reserves
+                    max_safe_distribution = cash_balance - required_reserve
+                    
+                    # Conservative recommendation: lesser of
+                    # - 50% of projected 6-month FCF (more conservative than 70%)
+                    # - Available cash after maintaining 6-month reserve
+                    safe_distribution = min(total_fcf * 0.5, max_safe_distribution)
+                    
+                    # Verify reserves will be adequate after distribution
+                    balance_data_dict = {
+                        'months_of_reserves': months_of_reserves,
+                        'cash_balance': cash_balance,
+                        'monthly_debt_service': monthly_debt_service,
+                        'current_liabilities': current_liabilities
+                    }
+                    reserves_after = self._calculate_reserves_after_distribution(balance_data_dict, safe_distribution)
+                    
+                    if safe_distribution > 50000 and reserves_after >= 6:
+                        return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
+                    else:
+                        return ('DO_NOTHING', None, 'MEDIUM', None)
+                
+                # If NOT all positive months, or lowest month concerning, hold cash
+                elif not all_positive or lowest_month_fcf < 0:
+                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                
+                # If avg FCF positive but low, wait longer
+                elif avg_fcf < self.decision_thresholds['distribution_min']:
+                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                
+                else:
+                    return ('DO_NOTHING', None, 'MEDIUM', None)
             
-            # Default: do nothing
-            return ('DO_NOTHING', None, 'MEDIUM', None)
+            else:
+                # FALLBACK: Single-month analysis (backward compatible)
+                # Only recommend distribution if surplus is substantial and reserves are strong
+                if surplus_amount > self.decision_thresholds['distribution_min'] and \
+                   months_of_reserves > self.decision_thresholds['cash_reserve_months'] * 1.5 and \
+                   noi_ytd_variance_pct > 0:  # Performing above budget
+                    
+                    # Calculate safe distribution amount (leave 6 months reserves)
+                    safe_distribution = min(
+                        surplus_amount,
+                        working_capital - (self.decision_thresholds['cash_reserve_months'] * 
+                                          (cash_balance / months_of_reserves))
+                    )
+                    
+                    if safe_distribution > 50000:
+                        return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
+                
+                # Default: do nothing
+                return ('DO_NOTHING', None, 'MEDIUM', None)
     
     def _generate_executive_summary(self, decision: str, amount: float, projected_fcf: float,
                                    cash_balance: float, months_of_reserves: float,
@@ -449,7 +627,8 @@ class RecommendationEngine:
     
     def _format_cash_forecast_details(self, data: Dict) -> str:
         """Format cash forecast section"""
-        return f"""
+        
+        base_analysis = f"""
 CASH FORECAST ANALYSIS
 {'='*80}
 
@@ -465,11 +644,48 @@ Occupancy:
   Current Actual: {data.get('current_occupancy', 0):.1f}%
   Projected Budget: {data.get('projected_occupancy', 0):.1f}%
 
-Distributions/Contributions (Current Month): ${data.get('current_distributions', 0):,.2f}
+Actual Distributions/Contributions in {data.get('current_month', 'Current Month')}: ${data.get('current_distributions', 0):,.2f}
+"""
+        
+        # Add 6-month projection if available
+        projected_months = data.get('projected_months', [])
+        if projected_months:
+            total_fcf = sum(m['fcf'] for m in projected_months)
+            avg_fcf = total_fcf / len(projected_months)
+            lowest_month = min(projected_months, key=lambda x: x['fcf'])
+            highest_month = max(projected_months, key=lambda x: x['fcf'])
+            negative_months = [m for m in projected_months if m['fcf'] < 0]
+            
+            projection_section = f"""
+{'='*80}
+6-MONTH CASH FLOW PROJECTION
+{'='*80}
 
+Analyzing next {len(projected_months)} months of projections:
+"""
+            for i, month in enumerate(projected_months, 1):
+                status_icon = "✓" if month['fcf'] > 0 else "✗"
+                projection_section += f"  {i}. {month['month']:<15} FCF: ${month['fcf']:>12,.2f}  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
+            
+            projection_section += f"""
+Summary Statistics:
+  Total Projected FCF (6 months): ${total_fcf:,.2f}
+  Average Monthly FCF:            ${avg_fcf:,.2f}
+  Highest Month:                  {highest_month['month']} (${highest_month['fcf']:,.2f})
+  Lowest Month:                   {lowest_month['month']} (${lowest_month['fcf']:,.2f})
+  Positive Months:                {len([m for m in projected_months if m['fcf'] > 0])} of {len(projected_months)}
+  Negative Months:                {len(negative_months)}
+"""
+            if negative_months:
+                projection_section += f"  ⚠️  Warning: {len(negative_months)} month(s) show negative cash flow\n"
+            
+            base_analysis += projection_section
+        
+        base_analysis += f"""
 INTERPRETATION:
 {self._interpret_cash_forecast(data)}
 """
+        return base_analysis
     
     def _format_income_statement_details(self, data: Dict) -> str:
         """Format income statement section"""
@@ -641,8 +857,8 @@ This recommendation is based on the following factors:
    - Revenue performance supports sustainable cash generation
 
 3. RESERVE ADEQUACY POST-DISTRIBUTION
-   - After distribution, reserves will remain at {balance_data.get('months_of_reserves', 0) - (amount / balance_data.get('monthly_debt_service', 1)):.1f} months
-   - This exceeds the 6-month minimum reserve requirement
+   - After distribution, reserves will remain at {self._calculate_reserves_after_distribution(balance_data, amount):.1f} months
+   - This {'exceeds' if self._calculate_reserves_after_distribution(balance_data, amount) >= 6 else 'maintains'} the 6-month minimum reserve requirement
    - Property retains adequate cushion for unexpected expenses or market changes
 
 4. MARKET CONDITIONS
