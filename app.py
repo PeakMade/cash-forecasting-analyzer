@@ -272,17 +272,15 @@ def session_start():
         session.pop('session_start_logged', None)
         
         # Log session restart
-        try:
-            from services.data_source_factory import get_property_data_source
-            db = get_property_data_source(access_token=token)
-            db.log_activity(
-                user_email=session['user']['email'],
-                user_name=session['user']['name'],
-                activity_type='session_start',
-                application=get_application_name()
-            )
-        except Exception as e:
-            print(f"=== WARNING: Failed to log session start: {str(e)} ===")
+        from services.data_source_factory import get_property_data_source
+        db = get_property_data_source(access_token=token)
+        db.log_activity(
+            user_email=session['user']['email'],
+            user_name=session['user']['name'],
+            activity_type='session_start',
+            application=get_application_name()
+        )
+        print(f"=== SESSION RESTART LOGGED for {session['user']['name']} ===")
         
         return jsonify({'success': True})
     except Exception as e:
