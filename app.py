@@ -46,6 +46,21 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # Initialize Azure AD authentication
 azure_auth = AzureADAuth(app)
 
+def is_local_environment():
+    """Detect if running in local development environment"""
+    # Check common local environment indicators
+    return (
+        os.getenv('FLASK_ENV') == 'development' or
+        os.getenv('ENVIRONMENT') == 'local' or
+        app.debug or
+        request.host.startswith('127.0.0.1') or
+        request.host.startswith('localhost')
+    )
+
+def get_application_name():
+    """Get application name based on environment"""
+    return 'CashForecastAnalyzerLocal' if is_local_environment() else 'CashForecastAnalyzer'
+
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and \
@@ -126,7 +141,7 @@ def auth_callback():
         session['sharepoint_access_token'] = result['access_token']
         print(f"### SharePoint token stored from initial login (length: {len(result['access_token'])})")
     
-    # Log user login activity
+    # Log session start (initial login)
     try:
         from services.data_source_factory import get_property_data_source
         access_token = azure_auth.get_sharepoint_token()
@@ -135,11 +150,12 @@ def auth_callback():
             db.log_activity(
                 user_email=session['user']['email'],
                 user_name=session['user']['name'],
-                activity_type='login'
+                activity_type='session_start',
+                application=get_application_name()
             )
     except Exception as e:
         # Don't break login if logging fails
-        print(f"=== WARNING: Failed to log login activity: {str(e)} ===")
+        print(f"=== WARNING: Failed to log session start: {str(e)} ===")
     
     # Redirect directly to index - no second consent needed
     return redirect(url_for('index'))
@@ -249,11 +265,11 @@ def session_start():
         # Clean up preserved user info (moved to active session)
         session.pop('user_info_preserved', None)
         
-        # Clear access logged flag so next index access is logged
-        session.pop('session_access_logged', None)
-        
         # Remove session_ended flag
         session.pop('session_ended', None)
+        
+        # Clear session_start_logged so next index access will log again
+        session.pop('session_start_logged', None)
         
         # Log session restart
         try:
@@ -262,7 +278,8 @@ def session_start():
             db.log_activity(
                 user_email=session['user']['email'],
                 user_name=session['user']['name'],
-                activity_type='session_start'
+                activity_type='session_start',
+                application=get_application_name()
             )
         except Exception as e:
             print(f"=== WARNING: Failed to log session start: {str(e)} ===")
@@ -276,6 +293,7 @@ def session_start():
 @login_required
 def index():
     """Main page with file upload form"""
+    print("=== INDEX ROUTE V4 - LOGIN NOW LOGS SESSION_START ===")
     # Validate that user info exists in session (for old sessions, force re-auth)
     user_info = session.get('user')
     if not user_info or not user_info.get('name') or not user_info.get('email') or \
@@ -284,23 +302,26 @@ def index():
         session.clear()
         return redirect(url_for('login'))
     
-    # Log first access of this session (if not already logged)
-    if not session.get('session_access_logged'):
+    # Log session start on first access (whether from fresh login or existing auth)
+    if not session.get('session_start_logged'):
         try:
             from services.data_source_factory import get_property_data_source
-            user_email = user_info.get('email', 'unknown')
-            user_name = user_info.get('name', 'unknown')
             access_token = azure_auth.get_sharepoint_token()
             if access_token:
                 db = get_property_data_source(access_token=access_token)
                 db.log_activity(
-                    user_email=user_email,
-                    user_name=user_name,
-                    activity_type='session_access'
+                    user_email=user_info.get('email'),
+                    user_name=user_info.get('name'),
+                    activity_type='session_start',
+                    application=get_application_name()
                 )
-                session['session_access_logged'] = True
+                session['session_start_logged'] = True
+                print(f"=== SESSION START LOGGED for {user_info.get('name')} ===")
         except Exception as e:
-            print(f"=== WARNING: Failed to log session access: {str(e)} ===")
+            print(f"=== WARNING: Failed to log session start: {str(e)} ===")
+    
+    # Note: Session start is logged by /session/start endpoint, not here
+    # This prevents duplicate logging when restarting sessions
     
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
     data_source = os.environ.get('PROPERTY_DATA_SOURCE', 'database')
@@ -442,6 +463,13 @@ def analyze_files():
         if not all([property_entity, property_address, zip_code, university]):
             return jsonify({'error': 'All property information fields are required'}), 400
         
+        # Capture filenames for logging
+        uploaded_filenames = ', '.join([
+            cash_forecast.filename,
+            income_statement.filename,
+            balance_sheet.filename
+        ])
+        
         # Validate file types
         if not cash_forecast.filename.endswith(('.xlsx', '.xls')):
             return jsonify({'error': 'Cash forecast must be an Excel file (.xlsx or .xls)'}), 400
@@ -512,6 +540,20 @@ def analyze_files():
             app.logger.error(f"Word document generation failed: {str(docx_error)}")
             # Continue even if Word document fails
         
+        # Log successful analysis
+        try:
+            user = get_user()
+            db.log_activity(
+                user_email=user.get('email', 'unknown'),
+                user_name=user.get('name', 'Unknown User'),
+                activity_type='analysis_successful',
+                property_name=property_info.get('name', property_entity),
+                file_names=uploaded_filenames,
+                application=get_application_name()
+            )
+        except Exception as log_error:
+            app.logger.error(f"Failed to log successful analysis: {str(log_error)}")
+        
         # Render results page
         return render_template('results.html', 
                              recommendation=result['recommendation'],
@@ -519,6 +561,37 @@ def analyze_files():
         
     except Exception as e:
         app.logger.error(f"Error in analysis: {str(e)}")
+        
+        # Log failed analysis (capture what we can)
+        try:
+            user = get_user()
+            property_name = request.form.get('property_name', 'Unknown') if request.form else 'Unknown'
+            
+            # Try to get filenames if available
+            file_names = 'Unknown'
+            if 'cash_forecast' in request.files and 'income_statement' in request.files and 'balance_sheet' in request.files:
+                file_names = ', '.join([
+                    request.files['cash_forecast'].filename if request.files['cash_forecast'].filename else 'unknown',
+                    request.files['income_statement'].filename if request.files['income_statement'].filename else 'unknown',
+                    request.files['balance_sheet'].filename if request.files['balance_sheet'].filename else 'unknown'
+                ])
+            
+            # Get access token and log activity
+            access_token = azure_auth.get_sharepoint_token()
+            from services.data_source_factory import get_property_data_source
+            db = get_property_data_source(access_token=access_token)
+            
+            db.log_activity(
+                user_email=user.get('email', 'unknown'),
+                user_name=user.get('name', 'Unknown User'),
+                activity_type='analysis_failed',
+                property_name=property_name,
+                file_names=file_names,
+                application=get_application_name()
+            )
+        except Exception as log_error:
+            app.logger.error(f"Failed to log analysis failure: {str(log_error)}")
+        
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/download-docx')
