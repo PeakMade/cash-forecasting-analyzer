@@ -7,7 +7,7 @@ from flask import Flask, render_template, request, jsonify, session, send_file, 
 from flask_session import Session
 from werkzeug.utils import secure_filename
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 from dotenv import load_dotenv
 from pathlib import Path
@@ -58,8 +58,22 @@ def is_local_environment():
     )
 
 def get_application_name():
-    """Get application name based on environment"""
-    return 'CashForecastAnalyzerLocal' if is_local_environment() else 'CashForecastAnalyzer'
+    """Get application name - always returns CashForecastAnalyzer"""
+    return 'CashForecastAnalyzer'
+
+def get_environment_name():
+    """Get environment name for logging"""
+    return 'Local' if is_local_environment() else 'Prod'
+
+def get_session_id():
+    """Get or generate logical session ID for activity tracking"""
+    import uuid
+    if 'logical_session_id' not in session:
+        session['logical_session_id'] = str(uuid.uuid4())
+        print(f"=== GENERATED NEW SESSION ID: {session['logical_session_id']} ===")
+    else:
+        print(f"=== USING EXISTING SESSION ID: {session['logical_session_id']} ===")
+    return session['logical_session_id']
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
@@ -150,9 +164,14 @@ def auth_callback():
             db.log_activity(
                 user_email=session['user']['email'],
                 user_name=session['user']['name'],
-                activity_type='session_start',
-                application=get_application_name()
+                activity_type='Start Session',
+                application=get_application_name(),
+                environment=get_environment_name(),
+                session_id=get_session_id()
             )
+            # Set timestamp immediately after logging to prevent duplicate log in index route
+            session['last_session_start'] = datetime.now().isoformat()
+            print(f"=== SESSION START LOGGED in auth/callback, timestamp set: {session['last_session_start']} ===")
     except Exception as e:
         # Don't break login if logging fails
         print(f"=== WARNING: Failed to log session start: {str(e)} ===")
@@ -174,6 +193,10 @@ def sharepoint_consent():
 @app.route('/logout')
 def logout():
     """End user session (without revoking MS tokens)"""
+    # Capture session ID BEFORE any session operations
+    current_session_id = session.get('logical_session_id', 'unknown')
+    print(f"=== LOGOUT: Captured existing session ID: {current_session_id} ===")
+    
     # Log user logout activity before clearing session
     try:
         from services.data_source_factory import get_property_data_source
@@ -185,8 +208,12 @@ def logout():
             db.log_activity(
                 user_email=user_email,
                 user_name=user_name,
-                activity_type='session_end'
+                activity_type='End Session',
+                application=get_application_name(),
+                environment=get_environment_name(),
+                session_id=current_session_id
             )
+            print(f"=== SESSION END LOGGED for {user_name} with SessionID: {current_session_id} ===")
     except Exception as e:
         # Don't break logout if logging fails
         print(f"=== WARNING: Failed to log session end activity: {str(e)} ===")
@@ -198,7 +225,7 @@ def logout():
     account = session.get('account')
     user_info = session.get('user')  # Preserve user name/email
     
-    # Clear all session data
+    # Clear all session data (including session start timestamp)
     session.clear()
     
     # Restore MS authentication data (keep tokens valid)
@@ -215,6 +242,7 @@ def logout():
     
     # Mark that tokens exist but session ended
     session['session_ended'] = True
+    # Note: last_session_start is cleared, so next access will log new session_start
     
     # Redirect to session ended page
     return redirect(url_for('session_ended'))
@@ -268,8 +296,10 @@ def session_start():
         # Remove session_ended flag
         session.pop('session_ended', None)
         
-        # Clear session_start_logged so next index access will log again
-        session.pop('session_start_logged', None)
+        # Generate new logical session ID for the restarted session
+        import uuid
+        session['logical_session_id'] = str(uuid.uuid4())
+        print(f"=== SESSION RESTART: Generated new session ID: {session['logical_session_id']} ===")
         
         # Log session restart
         from services.data_source_factory import get_property_data_source
@@ -277,9 +307,13 @@ def session_start():
         db.log_activity(
             user_email=session['user']['email'],
             user_name=session['user']['name'],
-            activity_type='session_start',
-            application=get_application_name()
+            activity_type='Start Session',
+            application=get_application_name(),
+            environment=get_environment_name(),
+            session_id=session['logical_session_id']
         )
+        # Set timestamp to prevent duplicate logging when navigating to index
+        session['last_session_start'] = datetime.now().isoformat()
         print(f"=== SESSION RESTART LOGGED for {session['user']['name']} ===")
         
         return jsonify({'success': True})
@@ -301,25 +335,60 @@ def index():
         return redirect(url_for('login'))
     
     # Log session start on first access (whether from fresh login or existing auth)
-    if not session.get('session_start_logged'):
+    # Use timestamp to determine if this is a new session (handles browser close without explicit logout)
+    SESSION_TIMEOUT_MINUTES = 30
+    last_session_start = session.get('last_session_start')
+    current_time = datetime.now()
+    
+    should_log_session_start = False
+    if not last_session_start:
+        print("=== NO PREVIOUS SESSION START TIMESTAMP - LOGGING NEW SESSION ===")
+        should_log_session_start = True
+    else:
+        # Parse the timestamp and check if it's been more than SESSION_TIMEOUT_MINUTES
+        try:
+            last_start_time = datetime.fromisoformat(last_session_start)
+            time_since_last_start = current_time - last_start_time
+            print(f"=== LAST SESSION START: {last_start_time}, TIME ELAPSED: {time_since_last_start} ===")
+            
+            if time_since_last_start > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+                print(f"=== SESSION TIMEOUT ({SESSION_TIMEOUT_MINUTES} min) EXCEEDED - LOGGING NEW SESSION ===")
+                should_log_session_start = True
+            else:
+                print(f"=== WITHIN SESSION WINDOW ({SESSION_TIMEOUT_MINUTES} min) - SKIPPING SESSION START LOG ===")
+        except (ValueError, TypeError) as e:
+            print(f"=== ERROR PARSING SESSION TIMESTAMP: {e} - LOGGING NEW SESSION ===")
+            should_log_session_start = True
+    
+    if should_log_session_start:
+        print("=== ATTEMPTING TO LOG SESSION START ===")
         try:
             from services.data_source_factory import get_property_data_source
             access_token = azure_auth.get_sharepoint_token()
+            print(f"=== ACCESS TOKEN ACQUIRED: {access_token is not None} ===")
             if access_token:
                 db = get_property_data_source(access_token=access_token)
+                # Generate new logical session ID for new session (timeout or first access)
+                import uuid
+                session['logical_session_id'] = str(uuid.uuid4())
+                print(f"=== NEW SESSION (timeout/first access): Generated session ID: {session['logical_session_id']} ===")
+                
                 db.log_activity(
                     user_email=user_info.get('email'),
                     user_name=user_info.get('name'),
-                    activity_type='session_start',
-                    application=get_application_name()
+                    activity_type='Start Session',
+                    application=get_application_name(),
+                    environment=get_environment_name(),
+                    session_id=session['logical_session_id']
                 )
-                session['session_start_logged'] = True
-                print(f"=== SESSION START LOGGED for {user_info.get('name')} ===")
+                session['last_session_start'] = current_time.isoformat()
+                print(f"=== SESSION START LOGGED for {user_info.get('name')} at {current_time} ===")
+            else:
+                print("=== WARNING: No access token, cannot log session start ===")
         except Exception as e:
-            print(f"=== WARNING: Failed to log session start: {str(e)} ===")
-    
-    # Note: Session start is logged by /session/start endpoint, not here
-    # This prevents duplicate logging when restarting sessions
+            print(f"=== ERROR: Failed to log session start: {str(e)} ===")
+            import traceback
+            traceback.print_exc()
     
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
     data_source = os.environ.get('PROPERTY_DATA_SOURCE', 'database')
@@ -544,10 +613,12 @@ def analyze_files():
             db.log_activity(
                 user_email=user.get('email', 'unknown'),
                 user_name=user.get('name', 'Unknown User'),
-                activity_type='analysis_successful',
+                activity_type='Successful Analysis',
                 property_name=property_info.get('name', property_entity),
                 file_names=uploaded_filenames,
-                application=get_application_name()
+                application=get_application_name(),
+                environment=get_environment_name(),
+                session_id=get_session_id()
             )
         except Exception as log_error:
             app.logger.error(f"Failed to log successful analysis: {str(log_error)}")
@@ -582,10 +653,12 @@ def analyze_files():
             db.log_activity(
                 user_email=user.get('email', 'unknown'),
                 user_name=user.get('name', 'Unknown User'),
-                activity_type='analysis_failed',
+                activity_type='Failed Analysis',
                 property_name=property_name,
                 file_names=file_names,
-                application=get_application_name()
+                application=get_application_name(),
+                environment=get_environment_name(),
+                session_id=get_session_id()
             )
         except Exception as log_error:
             app.logger.error(f"Failed to log analysis failure: {str(log_error)}")

@@ -208,14 +208,22 @@ class SharePointDataSource:
             logger.error(f"Error listing SharePoint properties: {str(e)}")
             raise
     
-    def log_activity(self, user_email: str, user_name: str, activity_type: str) -> bool:
+    def log_activity(self, user_email: str, user_name: str, activity_type: str, 
+                    property_name: str = None, file_names: str = None, 
+                    application: str = 'CashForecastAnalyzer', environment: str = 'Prod',
+                    session_id: str = None) -> bool:
         """
         Log user activity to Innovation Use Log SharePoint list
         
         Args:
             user_email: User's email address
             user_name: User's display name
-            activity_type: Type of activity (e.g., 'login', 'logout')
+            activity_type: Type of activity (e.g., 'session_start', 'session_end', 'analysis_successful', 'analysis_failed')
+            property_name: Optional property name for analysis activities
+            file_names: Optional comma-separated list of uploaded filenames
+            application: Application name (default: 'CashForecastAnalyzer')
+            environment: Environment name (default: 'Prod', use 'Local' for local development)
+            session_id: Session ID for tracking activities within the same session
             
         Returns:
             True if logging successful, False otherwise
@@ -244,8 +252,17 @@ class SharePointDataSource:
                 'LoginTimestamp': datetime.utcnow().isoformat() + 'Z',  # Note: LoginTimestamp not LoginTimeStamp
                 'UserRole': 'user',
                 'ActivityType': activity_type,
-                'Application': 'CashForecastAnalyzer'
+                'Application': application,
+                'Env': environment
             }
+            
+            # Add optional fields if provided
+            if session_id:
+                log_entry['SessionID'] = session_id
+            if property_name:
+                log_entry['PropertyName'] = property_name
+            if file_names:
+                log_entry['FileNames'] = file_names
             
             log_list.add_item(log_entry).execute_query()
             logger.info(f"Logged activity: {activity_type} for {user_email}")
