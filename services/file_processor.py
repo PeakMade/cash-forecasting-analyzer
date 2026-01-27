@@ -58,6 +58,9 @@ class FileProcessor:
             # Step 3: Parse balance sheet
             balance_data = self.parse_balance_sheet(balance_sheet_path)
             
+            # Pass reporting month from income statement to balance sheet for consistent labeling
+            balance_data['reporting_month'] = income_data.get('reporting_month', 'Unknown')
+            
             # Step 4: Get economic analysis
             economic_data = self.get_economic_context(
                 property_name=property_info.get('name', 'Unknown'),
@@ -256,10 +259,103 @@ class FileProcessor:
                 'file_path': file_path
             }
     
+    def _extract_reporting_period(self, file_path: str, pdf_text: str) -> Tuple[str, str]:
+        """
+        Extract reporting month and YTD period from income statement PDF content
+        
+        Returns:
+            Tuple of (reporting_month, ytd_period)
+            Example: ("December 2025", "Jan-Dec")
+        """
+        reporting_month = None
+        ytd_period = None
+        
+        # PRIMARY METHOD: Extract from PDF text content
+        # Look for patterns like "Dec 2025 YTD ( Jan 2025 - Dec 2025 )"
+        ytd_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+YTD\s*\(\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*-\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*\)', pdf_text, re.IGNORECASE)
+        
+        if ytd_match:
+            month_abbr = ytd_match.group(1).capitalize()
+            year = ytd_match.group(2)
+            start_month = ytd_match.group(3).capitalize()
+            end_month = ytd_match.group(4).capitalize()
+            
+            # Convert abbreviated month to full name
+            month_map = {
+                'Jan': 'January', 'Feb': 'February', 'Mar': 'March', 'Apr': 'April',
+                'May': 'May', 'Jun': 'June', 'Jul': 'July', 'Aug': 'August',
+                'Sep': 'September', 'Oct': 'October', 'Nov': 'November', 'Dec': 'December'
+            }
+            
+            full_month = month_map.get(month_abbr, month_abbr)
+            reporting_month = f"{full_month} {year}"
+            ytd_period = f"{start_month}-{end_month}"
+            
+            logger.info(f"Extracted from PDF content: {reporting_month} (YTD: {ytd_period})")
+            return reporting_month, ytd_period
+        
+        # SECONDARY METHOD: Look for simple month pattern in PDF
+        # Pattern like "Sep 2025" or "December 2025" at the start of document
+        simple_month_match = re.search(r'^.{0,200}?(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})', pdf_text, re.IGNORECASE | re.MULTILINE)
+        
+        if simple_month_match:
+            month_name = simple_month_match.group(1).capitalize()
+            year = simple_month_match.group(2)
+            
+            # Expand abbreviations
+            abbrev_to_full = {
+                'Jan': 'January', 'Feb': 'February', 'Mar': 'March', 'Apr': 'April',
+                'May': 'May', 'Jun': 'June', 'Jul': 'July', 'Aug': 'August',
+                'Sep': 'September', 'Oct': 'October', 'Nov': 'November', 'Dec': 'December'
+            }
+            
+            full_month = abbrev_to_full.get(month_name, month_name)
+            reporting_month = f"{full_month} {year}"
+            
+            # Calculate YTD period based on reporting month
+            month_to_ytd = {
+                'January': 'Jan', 'February': 'Jan-Feb', 'March': 'Jan-Mar',
+                'April': 'Jan-Apr', 'May': 'Jan-May', 'June': 'Jan-Jun',
+                'July': 'Jan-Jul', 'August': 'Jan-Aug', 'September': 'Jan-Sep',
+                'October': 'Jan-Oct', 'November': 'Jan-Nov', 'December': 'Jan-Dec'
+            }
+            ytd_period = month_to_ytd.get(full_month, 'YTD')
+            
+            logger.info(f"Extracted from PDF text: {reporting_month} (YTD: {ytd_period})")
+            return reporting_month, ytd_period
+        
+        # FALLBACK: Try filename only if PDF parsing completely fails
+        logger.warning("Could not extract date from PDF content, trying filename as fallback")
+        filename = os.path.basename(file_path)
+        
+        # Pattern: "Month Year" or "Month-YY"
+        file_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)[_\s-]+(\d{2,4})', filename, re.IGNORECASE)
+        if file_match:
+            month = file_match.group(1).capitalize()
+            year_str = file_match.group(2)
+            year = f"20{year_str}" if len(year_str) == 2 else year_str
+            reporting_month = f"{month} {year}"
+            
+            month_to_ytd = {
+                'January': 'Jan', 'February': 'Jan-Feb', 'March': 'Jan-Mar',
+                'April': 'Jan-Apr', 'May': 'Jan-May', 'June': 'Jan-Jun',
+                'July': 'Jan-Jul', 'August': 'Jan-Aug', 'September': 'Jan-Sep',
+                'October': 'Jan-Oct', 'November': 'Jan-Nov', 'December': 'Jan-Dec'
+            }
+            ytd_period = month_to_ytd.get(month, 'YTD')
+            
+            logger.warning(f"Extracted from filename (unreliable): {reporting_month} (YTD: {ytd_period})")
+            return reporting_month, ytd_period
+        
+        # Complete fallback
+        logger.error("Could not extract reporting period from PDF or filename")
+        return "Unknown", "YTD"
+    
     def parse_income_statement(self, file_path: str) -> Dict[str, Any]:
         """
         Parse PDF income statement
         Extracts: Total Operating Income, Total Operating Expenses, NOI (month and YTD)
+        Also extracts reporting month and YTD period from filename or PDF content
         """
         logger.info(f"Parsing income statement: {file_path}")
         
@@ -267,6 +363,9 @@ class FileProcessor:
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 all_text = ''.join([page.extract_text() for page in pdf_reader.pages])
+            
+            # Extract reporting month and YTD period
+            reporting_month, ytd_period = self._extract_reporting_period(file_path, all_text)
             
             # Extract key line items
             line_items = {
@@ -276,7 +375,12 @@ class FileProcessor:
             }
             
             # Parse into structured data
-            result = {'status': 'success', 'file_path': file_path}
+            result = {
+                'status': 'success', 
+                'file_path': file_path,
+                'reporting_month': reporting_month,
+                'ytd_period': ytd_period
+            }
             
             if line_items['Total Operating Income']:
                 data = line_items['Total Operating Income']

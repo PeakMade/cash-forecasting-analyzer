@@ -689,16 +689,21 @@ INTERPRETATION:
     
     def _format_income_statement_details(self, data: Dict) -> str:
         """Format income statement section"""
+        # Extract reporting period (with fallback to hardcoded values)
+        reporting_month = data.get('reporting_month', 'September 2025')
+        ytd_period = data.get('ytd_period', 'Jan-Sep')
+        year = reporting_month.split()[-1] if reporting_month != 'Unknown' else '2025'
+        
         return f"""
 INCOME STATEMENT ANALYSIS
 {'='*80}
 
-September 2025 Performance (Month):
+{reporting_month} Performance (Month):
   Total Operating Income:  ${data.get('income_month_actual', 0):,.2f} vs ${data.get('income_month_budget', 0):,.2f} budget ({data.get('income_month_variance_pct', 0):+.2f}%)
   Total Operating Expenses: ${data.get('expenses_month_actual', 0):,.2f} vs ${data.get('expenses_month_budget', 0):,.2f} budget ({data.get('expenses_month_variance_pct', 0):+.2f}%)
   Net Operating Income:     ${data.get('noi_month_actual', 0):,.2f} vs ${data.get('noi_month_budget', 0):,.2f} budget ({data.get('noi_month_variance_pct', 0):+.2f}%)
 
-Year-to-Date 2025 Performance (Jan-Sep):
+Year-to-Date {year} Performance ({ytd_period}):
   Total Operating Income:  ${data.get('income_ytd_actual', 0):,.2f} vs ${data.get('income_ytd_budget', 0):,.2f} budget ({data.get('income_ytd_variance_pct', 0):+.2f}%)
   Total Operating Expenses: ${data.get('expenses_ytd_actual', 0):,.2f} vs ${data.get('expenses_ytd_budget', 0):,.2f} budget ({data.get('expenses_ytd_variance_pct', 0):+.2f}%)
   Net Operating Income:     ${data.get('noi_ytd_actual', 0):,.2f} vs ${data.get('noi_ytd_budget', 0):,.2f} budget ({data.get('noi_ytd_variance_pct', 0):+.2f}%)
@@ -709,11 +714,34 @@ INTERPRETATION:
     
     def _format_balance_sheet_details(self, data: Dict, months_of_reserves: float) -> str:
         """Format balance sheet section"""
+        # Extract reporting month from data (with fallback)
+        reporting_month = data.get('reporting_month', 'September 2025')
+        
+        # Calculate prior month for comparison
+        month_year = reporting_month.split()
+        if len(month_year) == 2:
+            current_month_name = month_year[0]
+            year = month_year[1]
+            
+            # Get prior month name
+            months = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December']
+            try:
+                current_idx = months.index(current_month_name)
+                prior_month_name = months[current_idx - 1] if current_idx > 0 else 'December'
+                prior_year = year if current_idx > 0 else str(int(year) - 1)
+                prior_month = f"{prior_month_name} {prior_year}"
+            except ValueError:
+                prior_month = "Prior Month"
+        else:
+            current_month_name = reporting_month
+            prior_month = "Prior Month"
+        
         return f"""
 BALANCE SHEET ANALYSIS
 {'='*80}
 
-Liquidity Position (September 2025):
+Liquidity Position ({reporting_month}):
   Cash and Cash Equivalents: ${data.get('cash_balance', 0):,.2f}
   Accounts Receivable:       ${data.get('accounts_receivable', 0):,.2f}
   Total Current Assets:      ${data.get('cash_balance', 0) + data.get('accounts_receivable', 0):,.2f}
@@ -733,8 +761,8 @@ Reserve Analysis:
   Assessment:                {"STRONG (>10 months)" if months_of_reserves > 10 else "ADEQUATE (6-10 months)" if months_of_reserves > 6 else "TIGHT (<6 months)"}
 
 Month-over-Month Cash Change:
-  August 2025 Cash:          ${data.get('cash_prior_month', 0):,.2f}
-  September 2025 Cash:       ${data.get('cash_balance', 0):,.2f}
+  {prior_month} Cash:          ${data.get('cash_prior_month', 0):,.2f}
+  {reporting_month} Cash:       ${data.get('cash_balance', 0):,.2f}
   Change:                    ${data.get('cash_balance', 0) - data.get('cash_prior_month', 0):,.2f} ({((data.get('cash_balance', 0) - data.get('cash_prior_month', 0)) / max(data.get('cash_prior_month', 1), 1) * 100):+.1f}%)
 
 INTERPRETATION:
