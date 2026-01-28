@@ -141,22 +141,25 @@ class FileProcessor:
             
             # Find FCF and distribution rows (search column 0 = column A)
             fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=0)
-            dist_row_idx = self._find_row_by_label(df, ['Distributions', 'Contribution', 'ACTUAL (Distributions)'], column=0)
+            actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=0)
+            forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=0)
             
-            logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, Dist:{dist_row_idx}")
+            logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
             
             # Extract rows
             status_row = df.iloc[status_row_idx, year_2025_cols].tolist() if status_row_idx is not None else []
             month_row = df.iloc[month_row_idx, year_2025_cols].tolist() if month_row_idx is not None else []
             budgeted_occ_row = df.iloc[budgeted_occ_idx, year_2025_cols].tolist() if budgeted_occ_idx is not None else []
             actual_occ_row = df.iloc[actual_occ_idx, year_2025_cols].tolist() if actual_occ_idx is not None else []
-            distributions_row = df.iloc[dist_row_idx, year_2025_cols].tolist() if dist_row_idx is not None else []
+            actual_distributions_row = df.iloc[actual_dist_row_idx, year_2025_cols].tolist() if actual_dist_row_idx is not None else []
+            forecasted_distributions_row = df.iloc[forecasted_dist_row_idx, year_2025_cols].tolist() if forecasted_dist_row_idx is not None else []
             fcf_row = df.iloc[fcf_row_idx, year_2025_cols].tolist() if fcf_row_idx is not None else []
             
             logger.debug(f"Status row: {status_row}")
             logger.debug(f"Month row: {month_row}")
             logger.debug(f"FCF row: {fcf_row}")
-            logger.debug(f"Distributions row: {distributions_row}")
+            logger.debug(f"Actual Distributions row: {actual_distributions_row}")
+            logger.debug(f"Forecasted Distributions row: {forecasted_distributions_row}")
             
             # Find current month (most recent "Actual" = LAST actual column) and next 6 months (Budget months)
             current_month_idx = None
@@ -199,9 +202,11 @@ class FileProcessor:
             current_occupancy = actual_occ_row[current_month_idx] if current_month_idx is not None else 0
             projected_occupancy = budgeted_occ_row[next_month_idx] if next_month_idx is not None else 0
             
-            current_distributions = distributions_row[current_month_idx] if current_month_idx is not None else 0
+            # Use ACTUAL distributions for current (actual) month, FORECASTED for projected (budget) month
+            current_distributions = actual_distributions_row[current_month_idx] if current_month_idx is not None and actual_distributions_row else 0
+            projected_distributions = forecasted_distributions_row[next_month_idx] if next_month_idx is not None and forecasted_distributions_row else 0
             
-            logger.debug(f"Raw values - FCF: {current_fcf}/{projected_fcf}, Occ: {current_occupancy}/{projected_occupancy}, Dist: {current_distributions}")
+            logger.debug(f"Raw values - FCF: {current_fcf}/{projected_fcf}, Occ: {current_occupancy}/{projected_occupancy}, Dist: {current_distributions}/{projected_distributions}")
             
             # Convert to float, handle potential non-numeric values
             current_fcf = float(current_fcf) if pd.notna(current_fcf) else 0.0
@@ -209,29 +214,59 @@ class FileProcessor:
             current_occupancy = float(current_occupancy) * 100 if pd.notna(current_occupancy) else 0.0
             projected_occupancy = float(projected_occupancy) * 100 if pd.notna(projected_occupancy) else 0.0
             current_distributions = float(current_distributions) if pd.notna(current_distributions) else 0.0
+            projected_distributions = float(projected_distributions) if pd.notna(projected_distributions) else 0.0
             
             logger.info(f"Parsed values - Current FCF: ${current_fcf:,.2f}, Projected FCF: ${projected_fcf:,.2f}")
             logger.info(f"Occupancy - Current: {current_occupancy:.1f}%, Projected: {projected_occupancy:.1f}%")
-            logger.info(f"Current distributions: ${current_distributions:,.2f}")
+            logger.info(f"Distributions - Current (Actual): ${current_distributions:,.2f}, Projected (Forecasted): ${projected_distributions:,.2f}")
             
-            # Extract 6-month projection data
+            # Calculate operational FCF (before planned distribution/contribution)
+            # The FCF in the Excel already includes the forecasted distribution, so we add it back
+            # Negative distribution = cash out, so we subtract it (add back the cash)
+            # Positive contribution = cash in, so we subtract it (remove the cash injection)
+            projected_operational_fcf = projected_fcf - projected_distributions
+            logger.info(f"Operational FCF (before planned distribution): ${projected_operational_fcf:,.2f}")
+            
+            # Extract budget month projection data
+            # Only include months with valid data (both FCF and occupancy must be present)
             projected_months = []
             for idx in budget_month_indices:
                 month_date = month_row[idx]
                 month_name = month_date.strftime('%B %Y') if isinstance(month_date, (pd.Timestamp, datetime)) else str(month_date)
                 
-                month_fcf = float(fcf_row[idx]) if pd.notna(fcf_row[idx]) else 0.0
-                month_occupancy = float(budgeted_occ_row[idx]) * 100 if pd.notna(budgeted_occ_row[idx]) else 0.0
+                # Check if data is valid before including
+                fcf_val = fcf_row[idx]
+                occ_val = budgeted_occ_row[idx]
+                forecasted_dist_val = forecasted_distributions_row[idx] if forecasted_distributions_row else 0
+                
+                # Skip this month if data is missing (NaN) or clearly invalid
+                if pd.isna(fcf_val) or pd.isna(occ_val):
+                    logger.debug(f"Skipping {month_name} - missing data (FCF: {fcf_val}, Occ: {occ_val})")
+                    continue
+                
+                month_fcf = float(fcf_val)
+                month_occupancy = float(occ_val) * 100
+                month_forecasted_dist = float(forecasted_dist_val) if pd.notna(forecasted_dist_val) else 0.0
+                
+                # Additional validation: if occupancy is exactly 0, likely no data
+                if month_occupancy == 0 and month_fcf == 0:
+                    logger.debug(f"Skipping {month_name} - zero values suggest no budget data")
+                    continue
+                
+                # Calculate operational FCF (before planned distribution)
+                month_operational_fcf = month_fcf - month_forecasted_dist
                 
                 projected_months.append({
                     'month': month_name,
                     'fcf': month_fcf,
-                    'occupancy': month_occupancy
+                    'operational_fcf': month_operational_fcf,  # FCF before planned distribution
+                    'occupancy': month_occupancy,
+                    'forecasted_distribution': month_forecasted_dist
                 })
             
-            logger.info(f"Extracted {len(projected_months)} months of projections")
-            for i, proj in enumerate(projected_months[:3], 1):  # Log first 3 months
-                logger.debug(f"  Month {i}: {proj['month']} - FCF: ${proj['fcf']:,.2f}, Occ: {proj['occupancy']:.1f}%")
+            logger.info(f"Extracted {len(projected_months)} valid month(s) of budget projections")
+            for i, proj in enumerate(projected_months, 1):  # Log all months
+                logger.debug(f"  Month {i}: {proj['month']} - Operational FCF: ${proj['operational_fcf']:,.2f}, After Dist: ${proj['fcf']:,.2f}, Occ: {proj['occupancy']:.1f}%")
             
             result = {
                 'status': 'success',
@@ -241,10 +276,12 @@ class FileProcessor:
                 'projected_month': projected_month_name,
                 'current_fcf': current_fcf,
                 'projected_fcf': projected_fcf,
+                'projected_operational_fcf': projected_operational_fcf,  # FCF before planned distribution
                 'current_occupancy': current_occupancy,
                 'projected_occupancy': projected_occupancy,
                 'current_distributions': current_distributions,
-                'projected_months': projected_months,  # NEW: 6-month projection data
+                'projected_distributions': projected_distributions,
+                'projected_months': projected_months,
                 'file_path': file_path
             }
             
@@ -471,9 +508,17 @@ class FileProcessor:
                 # Rough estimate: interest change month-over-month
                 result['monthly_debt_service'] = result['monthly_principal'] + (result['monthly_principal'] * 0.1)
             
-            # Calculate months of reserves
-            if 'cash_balance' in result and 'monthly_debt_service' in result and 'current_liabilities' in result:
-                monthly_needs = result['monthly_debt_service'] + (result['current_liabilities'] * 0.1)
+            # Calculate months of reserves - will be recalculated more accurately in recommendation engine
+            # This is a rough estimate only for balance sheet display
+            if 'cash_balance' in result:
+                if 'monthly_debt_service' in result and result['monthly_debt_service'] > 0:
+                    monthly_needs = result['monthly_debt_service'] + (result.get('current_liabilities', 0) * 0.1)
+                elif 'current_liabilities' in result and result['current_liabilities'] > 0:
+                    # No debt service: use 10% of current liabilities as proxy
+                    monthly_needs = result['current_liabilities'] * 0.1
+                else:
+                    monthly_needs = 0
+                
                 result['months_of_reserves'] = result['cash_balance'] / monthly_needs if monthly_needs > 0 else 999
             
             return result

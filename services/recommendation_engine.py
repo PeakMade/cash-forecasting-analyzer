@@ -58,9 +58,12 @@ class RecommendationEngine:
             projected_fcf, current_occupancy, projected_occupancy
         )
         
+        # Get monthly expenses from income statement for reserve calculation
+        monthly_expenses = income_statement_data.get('expenses_month_actual', 0)
+        
         # Calculate key ratios
         months_of_reserves = self._calculate_months_of_reserves(
-            cash_balance, monthly_debt_service, current_liabilities
+            cash_balance, monthly_debt_service, current_liabilities, monthly_expenses
         )
         
         working_capital = cash_balance - current_liabilities
@@ -179,12 +182,12 @@ class RecommendationEngine:
     
     def _analyze_multi_month_projection(self, projected_months: List[Dict]) -> Dict:
         """
-        Analyze 6-month cash flow projection
+        Analyze multi-month cash flow projection using operational FCF
         
         Returns:
             dict: {
-                'total_fcf': Total cumulative FCF over period,
-                'average_fcf': Average monthly FCF,
+                'total_fcf': Total cumulative operational FCF over period,
+                'average_fcf': Average monthly operational FCF,
                 'lowest_month': {'month': str, 'fcf': float},
                 'highest_month': {'month': str, 'fcf': float},
                 'positive_months': int,
@@ -196,16 +199,17 @@ class RecommendationEngine:
         if not projected_months:
             return None
         
-        total_fcf = sum(m['fcf'] for m in projected_months)
+        # Use operational FCF (before distributions) for analysis
+        total_fcf = sum(m.get('operational_fcf', m['fcf']) for m in projected_months)
         average_fcf = total_fcf / len(projected_months) if projected_months else 0
         
-        # Find lowest and highest months
-        lowest_month = min(projected_months, key=lambda x: x['fcf'])
-        highest_month = max(projected_months, key=lambda x: x['fcf'])
+        # Find lowest and highest months based on operational FCF
+        lowest_month = min(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
+        highest_month = max(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
         
-        # Count positive/negative months
-        positive_months = sum(1 for m in projected_months if m['fcf'] > 0)
-        negative_months = sum(1 for m in projected_months if m['fcf'] < 0)
+        # Count positive/negative months based on operational FCF
+        positive_months = sum(1 for m in projected_months if m.get('operational_fcf', m['fcf']) > 0)
+        negative_months = sum(1 for m in projected_months if m.get('operational_fcf', m['fcf']) < 0)
         
         # Determine trend (compare first half to second half)
         if len(projected_months) >= 4:
@@ -216,8 +220,8 @@ class RecommendationEngine:
                 first_half = projected_months[:half_point]
                 second_half = projected_months[half_point:]
                 
-                first_half_sum = sum(m['fcf'] for m in first_half)
-                second_half_sum = sum(m['fcf'] for m in second_half)
+                first_half_sum = sum(m.get('operational_fcf', m['fcf']) for m in first_half)
+                second_half_sum = sum(m.get('operational_fcf', m['fcf']) for m in second_half)
                 
                 first_half_avg = first_half_sum / len(first_half) if len(first_half) > 0 else 0
                 second_half_avg = second_half_sum / len(second_half) if len(second_half) > 0 else 0
@@ -240,8 +244,8 @@ class RecommendationEngine:
         return {
             'total_fcf': total_fcf,
             'average_fcf': average_fcf,
-            'lowest_month': {'month': lowest_month['month'], 'fcf': lowest_month['fcf']},
-            'highest_month': {'month': highest_month['month'], 'fcf': highest_month['fcf']},
+            'lowest_month': {'month': lowest_month['month'], 'fcf': lowest_month.get('operational_fcf', lowest_month['fcf'])},
+            'highest_month': {'month': highest_month['month'], 'fcf': highest_month.get('operational_fcf', highest_month['fcf'])},
             'positive_months': positive_months,
             'negative_months': negative_months,
             'trend': trend,
@@ -275,13 +279,22 @@ class RecommendationEngine:
             return 999  # Very safe position
     
     def _calculate_months_of_reserves(self, cash_balance: float, monthly_debt_service: float, 
-                                     current_liabilities: float) -> float:
+                                     current_liabilities: float, monthly_expenses: float = 0) -> float:
         """Calculate how many months of operating expenses + debt service the cash covers"""
-        if monthly_debt_service <= 0:
-            return 999  # No debt service, very safe
         
-        # Estimate monthly operating cash needs (debt service + portion of current liabilities)
-        monthly_needs = monthly_debt_service + (current_liabilities * 0.1)  # Assume 10% of current liab per month
+        # Calculate monthly needs based on what's available
+        if monthly_debt_service > 0:
+            # Has debt: use debt service + portion of liabilities
+            monthly_needs = monthly_debt_service + (current_liabilities * 0.1)
+        elif monthly_expenses > 0:
+            # No debt but have expense data: use operating expenses
+            monthly_needs = monthly_expenses
+        elif current_liabilities > 0:
+            # Fallback: use portion of liabilities
+            monthly_needs = current_liabilities * 0.1
+        else:
+            # No expenses available - very rare
+            return 999
         
         if monthly_needs <= 0:
             return 999
@@ -621,7 +634,7 @@ class RecommendationEngine:
             ),
             'decision_rationale': self._format_decision_rationale(
                 decision, amount, cash_forecast_data, income_statement_data, 
-                balance_sheet_data, economic_analysis
+                balance_sheet_data, economic_analysis, months_of_reserves
             )
         }
     
@@ -637,9 +650,27 @@ Current Month: {data.get('current_month', 'Unknown')} (Actual)
 Projected Month: {data.get('projected_month', 'Unknown')} (Budget)
 
 Current Month Free Cash Flow: ${data.get('current_fcf', 0):,.2f}
-Projected Month Free Cash Flow: ${data.get('projected_fcf', 0):,.2f}
-Variance: ${data.get('projected_fcf', 0) - data.get('current_fcf', 0):,.2f}
-
+"""
+        
+        # Show operational vs after-distribution FCF if there's a forecasted distribution
+        projected_distributions = data.get('projected_distributions', 0)
+        projected_operational_fcf = data.get('projected_operational_fcf', data.get('projected_fcf', 0))
+        
+        if projected_distributions != 0:
+            base_analysis += f"""
+Projected Month Analysis:
+  Operational FCF (before distribution): ${projected_operational_fcf:,.2f}
+  
+Accountant's Recommendation:
+  Planned Distribution/Contribution:     ${projected_distributions:,.2f}
+  Net FCF (after their distribution):    ${data.get('projected_fcf', 0):,.2f}
+  
+Variance from Current Month: ${projected_operational_fcf - data.get('current_fcf', 0):,.2f}
+"""
+        else:
+            base_analysis += f"Projected Month Free Cash Flow: ${data.get('projected_fcf', 0):,.2f}\nVariance: ${data.get('projected_fcf', 0) - data.get('current_fcf', 0):,.2f}\n"
+        
+        base_analysis += f"""
 Occupancy:
   Current Actual: {data.get('current_occupancy', 0):.1f}%
   Projected Budget: {data.get('projected_occupancy', 0):.1f}%
@@ -647,37 +678,54 @@ Occupancy:
 Actual Distributions/Contributions in {data.get('current_month', 'Current Month')}: ${data.get('current_distributions', 0):,.2f}
 """
         
-        # Add 6-month projection if available
+        # Add projection data if available
         projected_months = data.get('projected_months', [])
         if projected_months:
-            total_fcf = sum(m['fcf'] for m in projected_months)
-            avg_fcf = total_fcf / len(projected_months)
-            lowest_month = min(projected_months, key=lambda x: x['fcf'])
-            highest_month = max(projected_months, key=lambda x: x['fcf'])
-            negative_months = [m for m in projected_months if m['fcf'] < 0]
+            num_months = len(projected_months)
+            
+            # Use operational FCF for statistics
+            total_operational_fcf = sum(m.get('operational_fcf', m['fcf']) for m in projected_months)
+            avg_operational_fcf = total_operational_fcf / num_months
+            lowest_month = min(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
+            highest_month = max(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
+            negative_operational_months = [m for m in projected_months if m.get('operational_fcf', m['fcf']) < 0]
+            
+            # Dynamic section title based on actual months available
+            if num_months == 1:
+                section_title = "NEXT MONTH CASH FLOW PROJECTION"
+            elif num_months <= 3:
+                section_title = f"{num_months}-MONTH CASH FLOW PROJECTION"
+            else:
+                section_title = f"{num_months}-MONTH CASH FLOW PROJECTION"
             
             projection_section = f"""
 {'='*80}
-6-MONTH CASH FLOW PROJECTION
+{section_title}
 {'='*80}
 
-Analyzing next {len(projected_months)} months of projections:
+Analyzing next {num_months} month{'s' if num_months > 1 else ''} of projections:
 """
             for i, month in enumerate(projected_months, 1):
-                status_icon = "✓" if month['fcf'] > 0 else "✗"
-                projection_section += f"  {i}. {month['month']:<15} FCF: ${month['fcf']:>12,.2f}  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
+                operational_fcf = month.get('operational_fcf', month['fcf'])
+                status_icon = "✓" if operational_fcf > 0 else "✗"
+                
+                # Show both values if there's a forecasted distribution
+                if month.get('forecasted_distribution', 0) != 0:
+                    projection_section += f"  {i}. {month['month']:<15} Operational FCF: ${operational_fcf:>12,.2f}  (After Dist: ${month['fcf']:>12,.2f})  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
+                else:
+                    projection_section += f"  {i}. {month['month']:<15} FCF: ${month['fcf']:>12,.2f}  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
             
             projection_section += f"""
-Summary Statistics:
-  Total Projected FCF (6 months): ${total_fcf:,.2f}
-  Average Monthly FCF:            ${avg_fcf:,.2f}
-  Highest Month:                  {highest_month['month']} (${highest_month['fcf']:,.2f})
-  Lowest Month:                   {lowest_month['month']} (${lowest_month['fcf']:,.2f})
-  Positive Months:                {len([m for m in projected_months if m['fcf'] > 0])} of {len(projected_months)}
-  Negative Months:                {len(negative_months)}
+Summary Statistics (Operational FCF):
+  Total Projected FCF ({num_months} month{'s' if num_months > 1 else ''}): ${total_operational_fcf:,.2f}
+  Average Monthly FCF:            ${avg_operational_fcf:,.2f}
+  Highest Month:                  {highest_month['month']} (${highest_month.get('operational_fcf', highest_month['fcf']):,.2f})
+  Lowest Month:                   {lowest_month['month']} (${lowest_month.get('operational_fcf', lowest_month['fcf']):,.2f})
+  Positive Months:                {len([m for m in projected_months if m.get('operational_fcf', m['fcf']) > 0])} of {num_months}
+  Negative Months:                {len(negative_operational_months)}
 """
-            if negative_months:
-                projection_section += f"  ⚠️  Warning: {len(negative_months)} month(s) show negative cash flow\n"
+            if negative_operational_months:
+                projection_section += f"  ⚠️  Warning: {len(negative_operational_months)} month(s) show negative cash flow\n"
             
             base_analysis += projection_section
         
@@ -830,7 +878,8 @@ Risk Mitigation Strategies:
     
     def _format_decision_rationale(self, decision: str, amount: float, 
                                   cash_data: Dict, income_data: Dict,
-                                  balance_data: Dict, econ_data: Dict) -> str:
+                                  balance_data: Dict, econ_data: Dict,
+                                  months_of_reserves: float) -> str:
         """Format the final decision rationale"""
         
         if decision == 'CONTRIBUTE':
@@ -898,6 +947,35 @@ Maintain minimum ${balance_data.get('cash_balance', 0) - amount:,.2f} in operati
 """
         
         else:  # DO_NOTHING
+            # Check if accountant has a planned distribution we're contradicting
+            projected_operational_fcf = cash_data.get('projected_operational_fcf', cash_data.get('projected_fcf', 0))
+            projected_distributions = cash_data.get('projected_distributions', 0)
+            
+            accountant_note = ""
+            if projected_distributions < 0:  # Accountant planned a distribution
+                accountant_distribution = abs(projected_distributions)
+                # Calculate what reserves would be after receiving FCF and distributing
+                current_cash = balance_data.get('cash_balance', 0)
+                cash_after_fcf = current_cash + projected_operational_fcf
+                cash_after_distribution = cash_after_fcf - accountant_distribution
+                
+                # Monthly operating needs (to calculate months of reserves)
+                monthly_operating_needs = current_cash / months_of_reserves if months_of_reserves > 0 else 1
+                reserves_after_distribution = cash_after_distribution / monthly_operating_needs if monthly_operating_needs > 0 else 0
+                
+                accountant_note = f"""
+
+NOTE ON ACCOUNTANT'S PLANNED DISTRIBUTION:
+The accountant has planned a distribution of ${accountant_distribution:,.2f} for the upcoming month.
+We recommend AGAINST this distribution for the following reasons:
+
+• Current reserves of {months_of_reserves:.1f} months are BELOW the 6-month minimum requirement
+• After receiving operational FCF of ${projected_operational_fcf:,.2f}, cash would be ${cash_after_fcf:,.2f} ({cash_after_fcf / monthly_operating_needs:.1f} months)
+• Distributing ${accountant_distribution:,.2f} would reduce cash to ${cash_after_distribution:,.2f} ({reserves_after_distribution:.1f} months)
+• Prudent cash management requires building reserves through retained operational cash flow
+• Operational FCF should be RETAINED to strengthen liquidity position toward 6-month minimum
+"""
+            
             return f"""
 DECISION RATIONALE: NO ACTION REQUIRED
 {'='*80}
@@ -906,26 +984,27 @@ No capital contribution or distribution is recommended at this time.
 
 This recommendation is based on the following factors:
 
-1. STABLE CASH POSITION
-   - {'Projected deficit is minor and well within reserve capacity' if cash_data.get('projected_fcf', 0) < 0 else 'Projected cash flow is positive but not sufficient to warrant distribution'}
-   - Current reserves of ${balance_data.get('cash_balance', 0):,.2f} provide {balance_data.get('months_of_reserves', 0):.1f} months of coverage
-   - No immediate liquidity concerns
+1. RESERVE POSITION
+   - Current reserves of ${balance_data.get('cash_balance', 0):,.2f} provide only {months_of_reserves:.1f} months of coverage
+   - This is {'WELL BELOW' if months_of_reserves < 4 else 'BELOW'} the 6-month minimum reserve requirement
+   - {'Projected deficit is minor and well within reserve capacity' if cash_data.get('projected_fcf', 0) < 0 else 'Projected operational cash flow should be retained to build reserves'}
 
 2. OPERATIONAL PERFORMANCE
    - Property operating within expected parameters
    - {'Any variances from budget are not material to cash position' if abs(income_data.get('noi_ytd_variance_pct', 0)) < 10 else 'Performance variances warrant monitoring but not immediate action'}
 
 3. PRUDENT CASH MANAGEMENT
-   - Maintaining current reserve levels provides financial flexibility
-   - Cushion available for unexpected expenses or market changes
-   - Position allows property to handle normal business fluctuations
+   - Priority is building reserves to minimum 6-month level
+   - Distributions should be deferred until reserve target is achieved
+   - Strengthening liquidity position provides financial flexibility for unexpected expenses
 
 4. MARKET CONDITIONS
    - {self._get_market_condition_text(econ_data)}
-
+{accountant_note}
 RECOMMENDED ACTION:
-Continue normal operations. Monitor monthly performance and reassess cash position next month.
-{'Consider distribution if surplus pattern continues for 2-3 months.' if cash_data.get('projected_fcf', 0) > 50000 else ''}
+Continue normal operations and RETAIN operational cash flow to build reserves.
+Monitor monthly performance and reassess distribution potential once reserves reach 6+ months.
+{'Consider distribution if surplus pattern continues AND reserves exceed 6 months.' if cash_data.get('projected_fcf', 0) > 50000 else ''}
 {'Review budget assumptions if deficit pattern emerges.' if cash_data.get('projected_fcf', 0) < 0 else ''}
 """
     
@@ -940,13 +1019,22 @@ Continue normal operations. Monitor monthly performance and reassess cash positi
     
     def _interpret_cash_forecast(self, data: Dict) -> str:
         """Interpret cash forecast data"""
+        # Use operational FCF for interpretation, not after-distribution FCF
+        projected_operational_fcf = data.get('projected_operational_fcf', data.get('projected_fcf', 0))
         projected_fcf = data.get('projected_fcf', 0)
         current_fcf = data.get('current_fcf', 0)
+        projected_distributions = data.get('projected_distributions', 0)
         
-        if projected_fcf < 0:
-            return f"The projected month shows a cash deficit of ${abs(projected_fcf):,.2f}. This represents a significant variance from the current month's positive cash flow of ${current_fcf:,.2f}. The deficit may be due to seasonal factors, one-time expenses, debt service, or distributions planned for the month."
+        if projected_operational_fcf < 0:
+            return f"The projected month shows an operational cash deficit of ${abs(projected_operational_fcf):,.2f} before any planned distributions. This represents a significant variance from the current month's positive cash flow of ${current_fcf:,.2f}. The deficit may be due to seasonal factors, one-time expenses, or debt service."
         else:
-            return f"The projected month shows positive free cash flow of ${projected_fcf:,.2f}, consistent with the current month's performance of ${current_fcf:,.2f}. This indicates stable cash generation capability."
+            base_text = f"The projected month shows positive operational free cash flow of ${projected_operational_fcf:,.2f}, consistent with the current month's performance of ${current_fcf:,.2f}. This indicates stable cash generation capability."
+            
+            # Add note about accountant's planned distribution if present
+            if projected_distributions < 0:  # Negative = distribution
+                base_text += f" Note: The accountant has planned a ${abs(projected_distributions):,.2f} distribution for this month, which would result in net FCF of ${projected_fcf:,.2f}."
+            
+            return base_text
     
     def _interpret_income_statement(self, data: Dict) -> str:
         """Interpret income statement data
