@@ -26,6 +26,50 @@ class FileProcessor:
         self.economic_analyzer = EconomicAnalyzer(api_key=openai_api_key)
         self.recommendation_engine = RecommendationEngine()
     
+    def _validate_extracted_data(self, cash_data: Dict[str, Any], income_data: Dict[str, Any], balance_data: Dict[str, Any]) -> Tuple[bool, list]:
+        """
+        Validate that extracted data contains legitimate values
+        Returns: (is_valid, list_of_issues)
+        """
+        issues = []
+        
+        # Check cash forecast data
+        if cash_data.get('status') == 'error':
+            issues.append(f"Cash Forecast: {cash_data.get('error', 'Unknown error')}")
+        else:
+            if cash_data.get('current_fcf') == 0 and cash_data.get('projected_fcf') == 0:
+                issues.append("Cash Forecast: All FCF values are $0.00 - likely parsing failure")
+            if cash_data.get('current_occupancy') == 0 and cash_data.get('projected_occupancy') == 0:
+                issues.append("Cash Forecast: All occupancy values are 0% - likely parsing failure")
+        
+        # Check income statement data
+        if income_data.get('status') == 'error':
+            issues.append(f"Income Statement: {income_data.get('error', 'Unknown error')}")
+        else:
+            income_values = [
+                income_data.get('income_month_actual', 0),
+                income_data.get('income_ytd_actual', 0),
+                income_data.get('expenses_month_actual', 0),
+                income_data.get('noi_month_actual', 0)
+            ]
+            if all(v == 0 for v in income_values):
+                issues.append("Income Statement: All financial values are $0.00 - likely parsing failure or image-based PDF")
+        
+        # Check balance sheet data
+        if balance_data.get('status') == 'error':
+            issues.append(f"Balance Sheet: {balance_data.get('error', 'Unknown error')}")
+        else:
+            balance_values = [
+                balance_data.get('cash_balance', 0),
+                balance_data.get('accounts_receivable', 0),
+                balance_data.get('current_liabilities', 0)
+            ]
+            if all(v == 0 for v in balance_values):
+                issues.append("Balance Sheet: All financial values are $0.00 - likely parsing failure or image-based PDF")
+        
+        is_valid = len(issues) == 0
+        return is_valid, issues
+    
     def process_and_analyze(self,
                            cash_forecast_path: str,
                            income_statement_path: str,
@@ -44,6 +88,7 @@ class FileProcessor:
             Complete analysis with decision, executive summary, and detailed rationale
         """
         logger.info(f"Processing files for property: {property_info.get('name', 'Unknown')}")
+        logger.info("⏱️  Starting file parsing (no API calls yet)...")
         
         try:
             # Step 1: Parse cash forecast
@@ -61,7 +106,31 @@ class FileProcessor:
             # Pass reporting month from income statement to balance sheet for consistent labeling
             balance_data['reporting_month'] = income_data.get('reporting_month', 'Unknown')
             
+            # VALIDATION: Check if we extracted legitimate data before proceeding
+            is_valid, validation_issues = self._validate_extracted_data(cash_data, income_data, balance_data)
+            
+            if not is_valid:
+                error_msg = "Failed to extract valid data from input files:\n" + "\n".join(f"  • {issue}" for issue in validation_issues)
+                logger.error(f"Data validation failed:\n{error_msg}")
+                logger.error("❌ ABORTING - Will NOT call OpenAI API with invalid data")
+                logger.error("❌ NO API COSTS INCURRED")
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'validation_issues': validation_issues,
+                    'property_info': property_info,
+                    'raw_data': {
+                        'cash_forecast': cash_data,
+                        'income_statement': income_data,
+                        'balance_sheet': balance_data
+                    },
+                    'processed_at': datetime.now().isoformat()
+                }
+            
+            logger.info("✓ Data validation passed - all files parsed successfully")
+            
             # Step 4: Get economic analysis
+            logger.info("⚡ CALLING OPENAI API for economic context...")
             economic_data = self.get_economic_context(
                 property_name=property_info.get('name', 'Unknown'),
                 university=property_info.get('university', 'Unknown'),
@@ -72,6 +141,7 @@ class FileProcessor:
             )
             
             # Step 5: Generate recommendation
+            logger.info("⚡ CALLING OPENAI API for recommendation analysis...")
             recommendation = self.recommendation_engine.analyze_and_recommend(
                 cash_forecast_data=cash_data,
                 income_statement_data=income_data,
@@ -114,8 +184,27 @@ class FileProcessor:
             entity_number, property_name, current_month = self._parse_cash_forecast_filename(filename)
             logger.debug(f"Parsed filename - Entity: {entity_number}, Property: {property_name}, Month: {current_month}")
             
-            # Read Excel file
-            df = pd.read_excel(file_path, sheet_name=0, header=None)
+            # Find the correct sheet - look for "Cash Forecast" tab by name
+            excel_file = pd.ExcelFile(file_path)
+            sheet_names = excel_file.sheet_names
+            logger.debug(f"Available sheets: {sheet_names}")
+            
+            target_sheet = None
+            # Search for sheet containing "Cash Forecast" or "CF" (case-insensitive)
+            for sheet in sheet_names:
+                sheet_lower = sheet.lower()
+                if 'cash forecast' in sheet_lower or sheet_lower == 'cf':
+                    target_sheet = sheet
+                    logger.info(f"Found Cash Forecast sheet: '{sheet}'")
+                    break
+            
+            # Fall back to first sheet if no match found
+            if target_sheet is None:
+                target_sheet = sheet_names[0]
+                logger.info(f"No 'Cash Forecast' sheet found, using first sheet: '{target_sheet}'")
+            
+            # Read Excel file from the detected sheet
+            df = pd.read_excel(file_path, sheet_name=target_sheet, header=None)
             logger.debug(f"Excel file loaded - Shape: {df.shape}")
             
             # Auto-detect format by looking for 2025 data
@@ -135,14 +224,27 @@ class FileProcessor:
             # Month row is typically one row after status row
             month_row_idx = status_row_idx + 1 if status_row_idx is not None else None
             
-            # Find occupancy rows (search column 0 = column A)
+            # Find occupancy rows (search column 0 = column A or column 1 = column B)
             budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=0)
-            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=0)
+            if budgeted_occ_idx is None:
+                budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=1)
             
-            # Find FCF and distribution rows (search column 0 = column A)
+            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=0)
+            if actual_occ_idx is None:
+                actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=1)
+            
+            # Find FCF and distribution rows (search column 0 = column A or column 1 = column B)
             fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=0)
+            if fcf_row_idx is None:
+                fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=1)
+            
             actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=0)
+            if actual_dist_row_idx is None:
+                actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=1)
+            
             forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=0)
+            if forecasted_dist_row_idx is None:
+                forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=1)
             
             logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
             

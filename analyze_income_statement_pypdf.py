@@ -4,7 +4,7 @@ Analyze the Comparative Income Statement PDF using PyPDF2
 import PyPDF2
 import os
 
-pdf_path = r'sample_files\04_Rittenhouse Station_Comparative Income Statement_September 2025.pdf'
+pdf_path = r'sample_files\Rittenhouse Station\04_Rittenhouse Station_Comparative_Income Statement_September 2025.pdf'
 
 print("=" * 100)
 print("COMPARATIVE INCOME STATEMENT ANALYSIS")

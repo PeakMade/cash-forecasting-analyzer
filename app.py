@@ -588,8 +588,34 @@ def analyze_files():
             property_info=property_info
         )
         
+        # Check if analysis failed due to data validation issues
         if not result.get('success'):
-            return jsonify({'error': result.get('error', 'Analysis failed')}), 500
+            error_msg = result.get('error', 'Analysis failed')
+            validation_issues = result.get('validation_issues', [])
+            
+            # Log failed analysis with specific details
+            try:
+                user = get_user()
+                db.log_activity(
+                    user_email=user.get('email', 'unknown'),
+                    user_name=user.get('name', 'Unknown User'),
+                    activity_type='Failed Analysis',
+                    property_name=property_info.get('name', property_entity),
+                    file_names=uploaded_filenames,
+                    application=get_application_name(),
+                    environment=get_environment_name(),
+                    session_id=get_session_id()
+                )
+                app.logger.info(f"✓ Logged failed analysis for {property_info.get('name', property_entity)}")
+            except Exception as log_error:
+                app.logger.error(f"Failed to log validation failure: {str(log_error)}")
+            
+            # Return detailed error information
+            return jsonify({
+                'error': error_msg,
+                'validation_issues': validation_issues,
+                'details': 'Failed to extract valid data from input files. Check that files are correct format and contain data.'
+            }), 400
         
         # Generate Word document
         docx_filename = f"{property_entity}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"

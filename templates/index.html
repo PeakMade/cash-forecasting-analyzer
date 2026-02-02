@@ -346,6 +346,14 @@ document.getElementById('property_name').addEventListener('change', async functi
         return;
     }
     
+    // Clear any previous error messages when switching properties
+    const uploadForm = document.getElementById('upload-form');
+    const existingAlerts = uploadForm.querySelectorAll('.alert');
+    existingAlerts.forEach(alert => alert.remove());
+    
+    // Clear file inputs when switching to a new property
+    clearAllFileInputs();
+    
     try {
         const response = await fetch(`/api/property/${entityNumber}`);
         const data = await response.json();
@@ -362,6 +370,46 @@ document.getElementById('property_name').addEventListener('change', async functi
         console.error('Error loading property details:', error);
     }
 });
+
+// Helper function to clear all file inputs
+function clearAllFileInputs() {
+    const fileInputs = ['cash_forecast', 'income_statement', 'balance_sheet'];
+    
+    fileInputs.forEach(fileId => {
+        // Clear the file input
+        const fileInput = document.getElementById(fileId);
+        if (fileInput) {
+            fileInput.value = '';
+        }
+        
+        // Reset the drop zone visual state
+        const zone = document.getElementById(fileId + '_zone');
+        if (zone) {
+            // Remove file/error state classes
+            zone.classList.remove('has-file', 'has-error');
+            
+            // Reset the paragraph text back to default
+            const paragraph = zone.querySelector('p');
+            if (paragraph) {
+                // Restore original placeholder text based on file type
+                if (fileId === 'cash_forecast') {
+                    paragraph.textContent = 'Drop Cash Forecast file here or click to browse';
+                } else if (fileId === 'income_statement') {
+                    paragraph.textContent = 'Drop Income Statement file here or click to browse';
+                } else if (fileId === 'balance_sheet') {
+                    paragraph.textContent = 'Drop Balance Sheet file here or click to browse';
+                }
+            }
+            
+            // Clear error message
+            const errorDisplay = zone.querySelector('.error-text');
+            if (errorDisplay) {
+                errorDisplay.style.display = 'none';
+                errorDisplay.textContent = '';
+            }
+        }
+    });
+}
 
 // File validation patterns (case-insensitive, handles spaces and underscores)
 const fileValidation = {
