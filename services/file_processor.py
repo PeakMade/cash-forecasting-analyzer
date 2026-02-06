@@ -207,11 +207,15 @@ class FileProcessor:
             df = pd.read_excel(file_path, sheet_name=target_sheet, header=None)
             logger.debug(f"Excel file loaded - Shape: {df.shape}")
             
-            # Auto-detect format by looking for 2025 data
-            year_2025_cols = self._find_2025_columns(df)
-            logger.debug(f"Using columns {year_2025_cols[0]} to {year_2025_cols[-1]} for 2025 data ({len(year_2025_cols)} columns)")
+            # Step 1: Auto-detect which column contains the row labels
+            label_col = self._detect_label_column(df)
+            logger.info(f"Using column {label_col} (column {'ABCD'[label_col] if label_col < 4 else label_col}) for row labels")
             
-            # Find key rows dynamically by searching for labels
+            # Step 2: Auto-detect format by looking for month data (search starts after label column)
+            year_2025_cols = self._find_2025_columns(df, start_col=label_col + 1)
+            logger.debug(f"Using columns {year_2025_cols[0]} to {year_2025_cols[-1]} for month data ({len(year_2025_cols)} columns)")
+            
+            # Find key rows dynamically by searching for labels in the detected label column
             status_row_idx = self._find_row_by_label(df, ['Actual', 'Budget'], column=year_2025_cols[0])
             if status_row_idx is None:
                 # Try looking in column 1 for status row
@@ -224,27 +228,14 @@ class FileProcessor:
             # Month row is typically one row after status row
             month_row_idx = status_row_idx + 1 if status_row_idx is not None else None
             
-            # Find occupancy rows (search column 0 = column A or column 1 = column B)
-            budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=0)
-            if budgeted_occ_idx is None:
-                budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=1)
+            # Find occupancy rows using detected label column
+            budgeted_occ_idx = self._find_row_by_label(df, ['Budgeted Occupancy', 'Budget Occupancy'], column=label_col)
+            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=label_col)
             
-            actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=0)
-            if actual_occ_idx is None:
-                actual_occ_idx = self._find_row_by_label(df, ['Actual Occupancy'], column=1)
-            
-            # Find FCF and distribution rows (search column 0 = column A or column 1 = column B)
-            fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=0)
-            if fcf_row_idx is None:
-                fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=1)
-            
-            actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=0)
-            if actual_dist_row_idx is None:
-                actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=1)
-            
-            forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=0)
-            if forecasted_dist_row_idx is None:
-                forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=1)
+            # Find FCF and distribution rows using detected label column
+            fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=label_col)
+            actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=label_col)
+            forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=label_col)
             
             logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
             
@@ -712,17 +703,64 @@ class FileProcessor:
     
     # Helper methods
     
-    def _find_2025_columns(self, df: pd.DataFrame) -> list:
+    def _detect_label_column(self, df: pd.DataFrame) -> int:
+        """
+        Auto-detect which column contains the row labels (Free Cash Flow, Occupancy, etc.)
+        Searches columns 0-3 for common keywords and returns the column with the most matches.
+        
+        Returns:
+            Column index (0-based) containing the labels, defaults to 0 if not found
+        """
+        # Keywords we expect to find in the label column
+        keywords = [
+            'free cash flow', 'free cash', 'fcf',
+            'occupancy', 'budgeted occupancy', 'actual occupancy',
+            'distribution', 'contribution',
+            'actual', 'budget', 'forecasted'
+        ]
+        
+        # Count matches in each of the first 4 columns
+        column_scores = {}
+        for col_idx in range(min(4, df.shape[1])):
+            score = 0
+            for row_idx in range(min(50, len(df))):  # Check first 50 rows
+                cell = df.iloc[row_idx, col_idx]
+                if pd.notna(cell):
+                    cell_str = str(cell).lower()
+                    for keyword in keywords:
+                        if keyword in cell_str:
+                            score += 1
+            column_scores[col_idx] = score
+        
+        # Find column with highest score
+        if column_scores:
+            label_col = max(column_scores, key=column_scores.get)
+            if column_scores[label_col] > 0:
+                logger.info(f"Detected label column: {label_col} (column {'ABCD'[label_col]}) with {column_scores[label_col]} keyword matches")
+                logger.debug(f"Column scores: {column_scores}")
+                return label_col
+        
+        # Default to column 0 if no clear winner
+        logger.warning("Could not auto-detect label column, defaulting to column 0 (A)")
+        return 0
+    
+    def _find_2025_columns(self, df: pd.DataFrame, start_col: int = 0) -> list:
         """
         Auto-detect which columns contain month data (current and future years)
-        Returns list of column indices
+        
+        Args:
+            start_col: Column index to start searching from (typically after label column)
+            
+        Returns:
+            List of column indices
         NOTE: Method name kept as _find_2025_columns for compatibility, but now finds all month columns
         """
         # Search for columns containing dates in first 10 rows
+        # Start searching from start_col (typically column after labels)
         month_cols = []
         first_date_col = None
         
-        for col_idx in range(df.shape[1]):
+        for col_idx in range(start_col, df.shape[1]):
             for row_idx in range(min(10, len(df))):
                 cell = df.iloc[row_idx, col_idx]
                 
