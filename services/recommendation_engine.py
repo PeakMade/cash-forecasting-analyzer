@@ -17,6 +17,24 @@ class RecommendationEngine:
             'cash_reserve_months': 6,    # Minimum months of reserves to maintain
         }
     
+    def _round_to_nearest_10k(self, amount: float) -> float:
+        """
+        Round amount up to the nearest $10,000
+        
+        Args:
+            amount: Dollar amount to round
+            
+        Returns:
+            Amount rounded up to nearest $10,000
+            
+        Examples:
+            $180,234 → $190,000
+            $150,000 → $150,000
+            $145,678 → $150,000
+        """
+        import math
+        return math.ceil(amount / 10000) * 10000
+    
     def analyze_and_recommend(self, cash_forecast_data: Dict, income_statement_data: Dict, 
                              balance_sheet_data: Dict, economic_analysis: Dict) -> Dict:
         """
@@ -25,10 +43,9 @@ class RecommendationEngine:
         Returns:
             dict: {
                 'decision': 'CONTRIBUTE' | 'DISTRIBUTE' | 'DO_NOTHING',
-                'amount': float or None,
+                'amount': float or None (rounded to nearest $10,000),
                 'executive_summary': [list of 5-7 bullet points],
-                'detailed_rationale': {detailed analysis sections},
-                'confidence': 'HIGH' | 'MEDIUM' | 'LOW'
+                'detailed_rationale': {detailed analysis sections}
             }
         """
         
@@ -69,7 +86,7 @@ class RecommendationEngine:
         working_capital = cash_balance - current_liabilities
         
         # Determine decision using ADJUSTED cash flow and multi-month analysis
-        decision, amount, confidence, contribution_breakdown = self._make_decision(
+        decision, amount, contribution_breakdown = self._make_decision(
             projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
             current_fcf=current_fcf,
             cash_balance=cash_balance,
@@ -83,10 +100,14 @@ class RecommendationEngine:
             multi_month_analysis=multi_month_analysis  # NEW: Pass multi-month data
         )
         
-        # Generate executive summary bullets
+        # Round amount to nearest $10,000 BEFORE generating summaries
+        # This ensures all displayed amounts are consistent
+        rounded_amount = self._round_to_nearest_10k(amount) if amount else None
+        
+        # Generate executive summary bullets (using rounded amount)
         executive_summary = self._generate_executive_summary(
             decision=decision,
-            amount=amount,
+            amount=rounded_amount,
             projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
             cash_balance=cash_balance,
             months_of_reserves=months_of_reserves,
@@ -104,24 +125,23 @@ class RecommendationEngine:
         if occupancy_adjustment_note:
             executive_summary.insert(2, occupancy_adjustment_note)  # Insert after decision and FCF bullets
         
-        # Generate detailed rationale
+        # Generate detailed rationale (using rounded amount)
         detailed_rationale = self._generate_detailed_rationale(
             cash_forecast_data=cash_forecast_data,
             income_statement_data=income_statement_data,
             balance_sheet_data=balance_sheet_data,
             economic_analysis=economic_analysis,
             decision=decision,
-            amount=amount,
+            amount=rounded_amount,
             months_of_reserves=months_of_reserves,
             occupancy_adjustment_note=occupancy_adjustment_note
         )
         
         return {
             'decision': decision,
-            'amount': amount,
+            'amount': rounded_amount,
             'executive_summary': executive_summary,
             'detailed_rationale': detailed_rationale,
-            'confidence': confidence,
             'property_name': cash_forecast_data.get('property_name', 'Unknown'),
             'analysis_month': cash_forecast_data.get('current_month', 'Unknown'),
             'projected_month': cash_forecast_data.get('projected_month', 'Unknown'),
@@ -304,13 +324,13 @@ class RecommendationEngine:
     def _make_decision(self, projected_fcf: float, current_fcf: float, cash_balance: float,
                       months_of_reserves: float, working_capital: float, noi_ytd_variance_pct: float,
                       seasonal_factor: Dict, enrollment_trend: str, multi_month_analysis: Dict = None,
-                      monthly_debt_service: float = 0, current_liabilities: float = 0) -> Tuple[str, float, str]:
+                      monthly_debt_service: float = 0, current_liabilities: float = 0) -> Tuple[str, float, Dict]:
         """
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
         Uses multi-month projection data when available for more robust analysis
         
         Returns:
-            Tuple[decision, amount, confidence, contribution_breakdown]
+            Tuple[decision, amount, contribution_breakdown]
         """
         
         # CRITICAL CHECK: Working capital crisis (current liabilities > current assets)
@@ -365,7 +385,7 @@ class RecommendationEngine:
                 'total': projected_multi_month_deficit + wc_deficit + operating_reserve_buffer
             }
             
-            return ('CONTRIBUTE', contribution_breakdown['total'], 'LOW', contribution_breakdown)
+            return ('CONTRIBUTE', contribution_breakdown['total'], contribution_breakdown)
         
         # Decision Logic Tree
         
@@ -376,19 +396,19 @@ class RecommendationEngine:
             # Minor deficit with strong reserves
             if deficit_amount < self.decision_thresholds['minor_deficit'] and \
                months_of_reserves > self.decision_thresholds['cash_reserve_months']:
-                return ('DO_NOTHING', None, 'HIGH', None)
+                return ('DO_NOTHING', None, None)
             
             # Moderate deficit with adequate reserves
             elif deficit_amount < self.decision_thresholds['moderate_deficit'] and \
                  months_of_reserves > 4:
-                return ('DO_NOTHING', None, 'MEDIUM', None)
+                return ('DO_NOTHING', None, None)
             
             # Major deficit or low reserves
             elif deficit_amount >= self.decision_thresholds['moderate_deficit'] or \
                  months_of_reserves < 3:
                 # Check if seasonal - if summer deficit, may not need contribution
                 if seasonal_factor.get('season') == 'Summer Session':
-                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                    return ('DO_NOTHING', None, None)
                 else:
                     # Calculate contribution with transparent breakdown
                     contribution_breakdown = {
@@ -397,10 +417,10 @@ class RecommendationEngine:
                         'working_capital_restoration': 0,  # No WC crisis in this path
                         'total': deficit_amount * 1.1
                     }
-                    return ('CONTRIBUTE', contribution_breakdown['total'], 'MEDIUM', contribution_breakdown)
+                    return ('CONTRIBUTE', contribution_breakdown['total'], contribution_breakdown)
             
             else:
-                return ('DO_NOTHING', None, 'MEDIUM', None)
+                return ('DO_NOTHING', None, None)
         
         # Case 2: Projected surplus
         else:
@@ -456,20 +476,20 @@ class RecommendationEngine:
                     reserves_after = self._calculate_reserves_after_distribution(balance_data_dict, safe_distribution)
                     
                     if safe_distribution > 50000 and reserves_after >= 6:
-                        return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
+                        return ('DISTRIBUTE', safe_distribution, None)
                     else:
-                        return ('DO_NOTHING', None, 'MEDIUM', None)
+                        return ('DO_NOTHING', None, None)
                 
                 # If NOT all positive months, or lowest month concerning, hold cash
                 elif not all_positive or lowest_month_fcf < 0:
-                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                    return ('DO_NOTHING', None, None)
                 
                 # If avg FCF positive but low, wait longer
                 elif avg_fcf < self.decision_thresholds['distribution_min']:
-                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                    return ('DO_NOTHING', None, None)
                 
                 else:
-                    return ('DO_NOTHING', None, 'MEDIUM', None)
+                    return ('DO_NOTHING', None, None)
             
             else:
                 # FALLBACK: Single-month analysis (backward compatible)
@@ -486,10 +506,10 @@ class RecommendationEngine:
                     )
                     
                     if safe_distribution > 50000:
-                        return ('DISTRIBUTE', safe_distribution, 'HIGH', None)
+                        return ('DISTRIBUTE', safe_distribution, None)
                 
                 # Default: do nothing
-                return ('DO_NOTHING', None, 'MEDIUM', None)
+                return ('DO_NOTHING', None, None)
     
     def _generate_executive_summary(self, decision: str, amount: float, projected_fcf: float,
                                    cash_balance: float, months_of_reserves: float,
@@ -531,7 +551,7 @@ class RecommendationEngine:
                 if reserve_buffer > 0:
                     breakdown_parts.append(f"Operating Reserve Buffer (3mo): ${reserve_buffer:,.0f}")
                 
-                breakdown_text = " + ".join(breakdown_parts) + f" = **${amount:,.0f}**"
+                breakdown_text = " + ".join(breakdown_parts) + f" ~ **${amount:,.0f}**"
                 
                 if working_capital < -50000:
                     if months_forward > 0:
@@ -643,7 +663,7 @@ class RecommendationEngine:
         
         base_analysis = f"""
 CASH FORECAST ANALYSIS
-{'='*80}
+{'='*78}
 
 Property: {data.get('property_name', 'Unknown')}
 Current Month: {data.get('current_month', 'Unknown')} (Actual)
@@ -699,9 +719,9 @@ Actual Distributions/Contributions in {data.get('current_month', 'Current Month'
                 section_title = f"{num_months}-MONTH CASH FLOW PROJECTION"
             
             projection_section = f"""
-{'='*80}
+{'='*78}
 {section_title}
-{'='*80}
+{'='*78}
 
 Analyzing next {num_months} month{'s' if num_months > 1 else ''} of projections:
 """
@@ -744,7 +764,7 @@ INTERPRETATION:
         
         return f"""
 INCOME STATEMENT ANALYSIS
-{'='*80}
+{'='*78}
 
 {reporting_month} Performance (Month):
   Total Operating Income:  ${data.get('income_month_actual', 0):,.2f} vs ${data.get('income_month_budget', 0):,.2f} budget ({data.get('income_month_variance_pct', 0):+.2f}%)
@@ -787,7 +807,7 @@ INTERPRETATION:
         
         return f"""
 BALANCE SHEET ANALYSIS
-{'='*80}
+{'='*78}
 
 Liquidity Position ({reporting_month}):
   Cash and Cash Equivalents: ${data.get('cash_balance', 0):,.2f}
@@ -823,7 +843,7 @@ INTERPRETATION:
         
         return f"""
 ECONOMIC & MARKET CONTEXT
-{'='*80}
+{'='*78}
 
 {analysis_text}
 """
@@ -862,7 +882,7 @@ ECONOMIC & MARKET CONTEXT
         
         return f"""
 RISK ASSESSMENT
-{'='*80}
+{'='*78}
 
 Key Risks Identified:
 
@@ -885,7 +905,7 @@ Risk Mitigation Strategies:
         if decision == 'CONTRIBUTE':
             return f"""
 DECISION RATIONALE: CAPITAL CONTRIBUTION REQUIRED
-{'='*80}
+{'='*78}
 
 Recommended Contribution Amount: ${amount:,.2f}
 
@@ -917,7 +937,7 @@ adequate cash is available for upcoming month obligations.
         elif decision == 'DISTRIBUTE':
             return f"""
 DECISION RATIONALE: CASH DISTRIBUTION RECOMMENDED
-{'='*80}
+{'='*78}
 
 Recommended Distribution Amount: ${amount:,.2f}
 
@@ -978,7 +998,7 @@ We recommend AGAINST this distribution for the following reasons:
             
             return f"""
 DECISION RATIONALE: NO ACTION REQUIRED
-{'='*80}
+{'='*78}
 
 No capital contribution or distribution is recommended at this time.
 

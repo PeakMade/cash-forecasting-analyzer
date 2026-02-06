@@ -39,12 +39,6 @@
         margin: 10px 0;
     }
     
-    .confidence {
-        font-size: 1.1rem;
-        opacity: 0.9;
-        margin-top: 10px;
-    }
-    
     .section {
         background: white;
         padding: 30px;
@@ -205,10 +199,8 @@
     </div>
     
     {% if recommendation.amount %}
-    <div class="amount">${{ "{:,.2f}".format(recommendation.amount) }}</div>
+    <div class="amount">${{ "{:,.0f}".format(recommendation.amount) }}</div>
     {% endif %}
-    
-    <div class="confidence">Confidence Level: {{ recommendation.confidence }}</div>
 </div>
 
 <div class="section">

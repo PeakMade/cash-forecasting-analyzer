@@ -84,7 +84,6 @@ class WordDocumentGenerator:
         
         # Executive Decision
         decision = recommendation.get('decision', 'DO_NOTHING')
-        confidence = recommendation.get('confidence', 'MEDIUM')
         amount = recommendation.get('amount')
         
         decision_para = doc.add_heading('EXECUTIVE DECISION', level=2)
@@ -109,16 +108,10 @@ class WordDocumentGenerator:
         if amount:
             amount_para = doc.add_paragraph()
             amount_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            amount_run = amount_para.add_run(f"${amount:,.2f}")
+            amount_run = amount_para.add_run(f"${amount:,.0f}")  # Removed decimal places since rounding to $10K
             amount_run.font.size = Pt(20)
             amount_run.bold = True
             amount_run.font.color.rgb = self.dark_gray
-        
-        confidence_para = doc.add_paragraph()
-        confidence_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        conf_run = confidence_para.add_run(f"Confidence: {confidence}")
-        conf_run.font.size = Pt(12)
-        conf_run.font.color.rgb = self.light_gray
         
         doc.add_page_break()
     
