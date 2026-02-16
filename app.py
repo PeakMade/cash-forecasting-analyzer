@@ -526,9 +526,30 @@ def analyze_files():
         property_address = request.form.get('property_address', '').strip()
         zip_code = request.form.get('zip_code', '').strip()
         university = request.form.get('university', '').strip()
+        client_risk = request.form.get('client_risk', '').strip()
         
-        if not all([property_entity, property_address, zip_code, university]):
+        if not all([property_entity, property_address, zip_code, university, client_risk]):
             return jsonify({'error': 'All property information fields are required'}), 400
+        
+        # Map client risk to reserve months (configurable via environment variables)
+        risk_to_months = {
+            'low': int(os.getenv('RISK_LOW_MONTHS', '2')),
+            'medium': int(os.getenv('RISK_MEDIUM_MONTHS', '6')),
+            'high': int(os.getenv('RISK_HIGH_MONTHS', '10'))
+        }
+        reserve_months = risk_to_months.get(client_risk.lower())
+        if reserve_months is None:
+            return jsonify({'error': 'Invalid client risk selection'}), 400
+        
+        # Map client risk to working capital target ratio (configurable via environment variables)
+        risk_to_wc_target = {
+            'low': float(os.getenv('RISK_LOW_WC_TARGET', '0.5')),
+            'medium': float(os.getenv('RISK_MEDIUM_WC_TARGET', '0.75')),
+            'high': float(os.getenv('RISK_HIGH_WC_TARGET', '1.0'))
+        }
+        wc_target_ratio = risk_to_wc_target.get(client_risk.lower(), 1.0)
+        
+        app.logger.info(f"Client Risk: {client_risk.upper()} → Reserve Months: {reserve_months}, WC Target Ratio: {wc_target_ratio}")
         
         # Capture filenames for logging
         uploaded_filenames = ', '.join([
@@ -572,7 +593,9 @@ def analyze_files():
             'state': db_property.get('state', 'Unknown'),
             'zip': db_property.get('zip_code', zip_code),
             'university': db_property.get('university', university),
-            'analysis_date': datetime.now().isoformat()
+            'analysis_date': datetime.now().isoformat(),
+            'client_risk': client_risk,
+            'reserve_months': reserve_months
         }
         
         # Process files and generate recommendation
@@ -585,7 +608,9 @@ def analyze_files():
             cash_forecast_path=cash_forecast_path,
             income_statement_path=income_statement_path,
             balance_sheet_path=balance_sheet_path,
-            property_info=property_info
+            property_info=property_info,
+            reserve_months=reserve_months,
+            wc_target_ratio=wc_target_ratio
         )
         
         # Check if analysis failed due to data validation issues

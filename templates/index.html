@@ -232,6 +232,17 @@
                         <label for="university">Associated University <span style="color: red;">*</span></label>
                         <input type="text" id="university" name="university" required placeholder="e.g., State University">
                     </div>
+                    
+                    <div class="form-group">
+                        <label for="client_risk">Client Risk <span style="color: red;">*</span></label>
+                        <select id="client_risk" name="client_risk" required style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 5px; font-size: 1rem;">
+                            <option value="">-- Select Risk Level --</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                        <div class="help-text">Determines required operating cash reserve months</div>
+                    </div>
                 </div>
             </div>
             

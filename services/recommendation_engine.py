@@ -36,9 +36,14 @@ class RecommendationEngine:
         return math.ceil(amount / 10000) * 10000
     
     def analyze_and_recommend(self, cash_forecast_data: Dict, income_statement_data: Dict, 
-                             balance_sheet_data: Dict, economic_analysis: Dict) -> Dict:
+                             balance_sheet_data: Dict, economic_analysis: Dict, 
+                             reserve_months: int = 6, wc_target_ratio: float = 1.0) -> Dict:
         """
         Generate comprehensive recommendation based on all input data
+        
+        Args:
+            reserve_months: Required months of operating cash reserve (default: 6)
+            wc_target_ratio: Target current ratio for working capital restoration (default: 1.0)
         
         Returns:
             dict: {
@@ -48,9 +53,13 @@ class RecommendationEngine:
                 'detailed_rationale': {detailed analysis sections}
             }
         """
+        # Override the default cash_reserve_months with the user-selected value
+        self.decision_thresholds['cash_reserve_months'] = reserve_months
+        self.decision_thresholds['wc_target_ratio'] = wc_target_ratio
         
         # Extract key metrics
         projected_fcf = cash_forecast_data.get('projected_fcf', 0)
+        projected_operational_fcf = cash_forecast_data.get('projected_operational_fcf', projected_fcf)  # Use operational if available
         current_fcf = cash_forecast_data.get('current_fcf', 0)
         cash_balance = balance_sheet_data.get('cash_balance', 0)
         current_liabilities = balance_sheet_data.get('current_liabilities', 0)
@@ -63,6 +72,16 @@ class RecommendationEngine:
         projected_months = cash_forecast_data.get('projected_months', [])
         multi_month_analysis = self._analyze_multi_month_projection(projected_months) if projected_months else None
         
+        if multi_month_analysis:
+            print(f"DEBUG: Multi-month analysis calculated:")
+            print(f"  - Months analyzed: {multi_month_analysis.get('months_analyzed', 0)}")
+            print(f"  - Average FCF: ${multi_month_analysis.get('average_fcf', 0):,.2f}")
+            print(f"  - Total FCF: ${multi_month_analysis.get('total_fcf', 0):,.2f}")
+            print(f"  - Positive months: {multi_month_analysis.get('positive_months', 0)}")
+            print(f"  - Negative months: {multi_month_analysis.get('negative_months', 0)}")
+        else:
+            print(f"DEBUG: No multi-month analysis available (projected_months count: {len(projected_months)})")
+        
         noi_ytd_variance_pct = income_statement_data.get('noi_ytd_variance_pct', 0)
         noi_month_variance_pct = income_statement_data.get('noi_month_variance_pct', 0)
         expenses_ytd_variance_pct = income_statement_data.get('expenses_ytd_variance_pct', 0)
@@ -70,9 +89,10 @@ class RecommendationEngine:
         seasonal_factor = economic_analysis.get('seasonal_factor', {})
         enrollment_trend = economic_analysis.get('enrollment_trend', 'stable')
         
-        # CRITICAL: Adjust projected FCF if occupancy gap exists
+        # CRITICAL: Adjust projected OPERATIONAL FCF if occupancy gap exists
+        # We use operational FCF (before distributions/contributions) for true operational analysis
         occupancy_adjusted_fcf, occupancy_adjustment_note = self._adjust_fcf_for_occupancy(
-            projected_fcf, current_occupancy, projected_occupancy
+            projected_operational_fcf, current_occupancy, projected_occupancy
         )
         
         # Get monthly expenses from income statement for reserve calculation
@@ -88,6 +108,7 @@ class RecommendationEngine:
         # Determine decision using ADJUSTED cash flow and multi-month analysis
         decision, amount, contribution_breakdown = self._make_decision(
             projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
+            projected_operational_fcf=projected_operational_fcf,  # Pass operational FCF for contributions
             current_fcf=current_fcf,
             cash_balance=cash_balance,
             months_of_reserves=months_of_reserves,
@@ -134,7 +155,8 @@ class RecommendationEngine:
             decision=decision,
             amount=rounded_amount,
             months_of_reserves=months_of_reserves,
-            occupancy_adjustment_note=occupancy_adjustment_note
+            occupancy_adjustment_note=occupancy_adjustment_note,
+            reserve_months=reserve_months
         )
         
         return {
@@ -324,14 +346,22 @@ class RecommendationEngine:
     def _make_decision(self, projected_fcf: float, current_fcf: float, cash_balance: float,
                       months_of_reserves: float, working_capital: float, noi_ytd_variance_pct: float,
                       seasonal_factor: Dict, enrollment_trend: str, multi_month_analysis: Dict = None,
-                      monthly_debt_service: float = 0, current_liabilities: float = 0) -> Tuple[str, float, Dict]:
+                      monthly_debt_service: float = 0, current_liabilities: float = 0,
+                      projected_operational_fcf: float = None) -> Tuple[str, float, Dict]:
         """
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
         Uses multi-month projection data when available for more robust analysis
         
+        Args:
+            projected_operational_fcf: Operational FCF before any distributions (used for contribution calculations)
+        
         Returns:
             Tuple[decision, amount, contribution_breakdown]
         """
+        
+        # Use operational FCF if provided, otherwise fall back to projected_fcf
+        if projected_operational_fcf is None:
+            projected_operational_fcf = projected_fcf
         
         # CRITICAL CHECK: Working capital crisis (current liabilities > current assets)
         # This indicates past-due obligations or structural cash flow problems
@@ -339,29 +369,52 @@ class RecommendationEngine:
             # Severe working capital deficit - property is behind on payments
             # Calculate contribution with transparent breakdown:
             # 1. Multi-month projected deficits (not just one month)
-            # 2. Working capital restoration (to get current ratio to 1.0)
-            # 3. Operating reserve buffer (3-6 months)
+            # 2. Working capital restoration (to target current ratio based on risk tolerance)
+            # 3. Operating reserve buffer (based on user-selected reserve_months)
             
-            wc_deficit = abs(working_capital)
-            monthly_deficit = abs(projected_fcf) if projected_fcf < 0 else 0
+            # Calculate working capital deficit based on user's risk tolerance
+            # Target: cash_balance = current_liabilities * wc_target_ratio
+            wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
+            target_cash = current_liabilities * wc_target_ratio
+            wc_deficit = max(0, target_cash - cash_balance)
+            
+            print(f"DEBUG: Working Capital Restoration - Target Ratio: {wc_target_ratio:.2f}")
+            print(f"DEBUG: Current Liabilities: ${current_liabilities:,.2f}, Cash: ${cash_balance:,.2f}")
+            print(f"DEBUG: Target Cash: ${target_cash:,.2f}, WC Deficit: ${wc_deficit:,.2f}")
+            
+            # Use multi-month average if available (avoids single-month anomalies like 3x debt service)
+            # Otherwise fall back to projected_operational_fcf
+            if multi_month_analysis and multi_month_analysis.get('average_fcf') is not None:
+                monthly_deficit = abs(multi_month_analysis['average_fcf']) if multi_month_analysis['average_fcf'] < 0 else 0
+                monthly_operating_cost = abs(multi_month_analysis['average_fcf']) if multi_month_analysis['average_fcf'] < 0 else 50000
+                print(f"DEBUG: Using multi-month average FCF: {multi_month_analysis['average_fcf']:,.2f} (analyzed {multi_month_analysis.get('months_analyzed', 0)} months)")
+                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}, monthly_operating_cost={monthly_operating_cost:,.2f}")
+            else:
+                monthly_deficit = abs(projected_operational_fcf) if projected_operational_fcf < 0 else 0
+                monthly_operating_cost = abs(projected_operational_fcf) if projected_operational_fcf < 0 else (current_fcf if current_fcf > 0 else 50000)
+                print(f"DEBUG: No multi-month data, using single month projected_operational_fcf: {projected_operational_fcf:,.2f}")
+                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}, monthly_operating_cost={monthly_operating_cost:,.2f}")
             
             # CRITICAL: If NOI is underperforming or there's persistent deficit, project forward
-            # Don't just cover one month - cover until property stabilizes
-            if projected_fcf < 0:
+            # Use user's risk tolerance (reserve_months) as the base forward projection period
+            # Adjust based on property performance
+            base_months = self.decision_thresholds['cash_reserve_months']
+            
+            if monthly_deficit > 0:
                 # If property showing deficit, assume it continues for multiple months
-                # Use 3 months as minimum forward projection period
+                # Scale the projection based on performance severity
                 if noi_ytd_variance_pct < -5:
-                    # Underperforming - use 6 months forward projection
-                    months_forward = 6
-                    forward_reason = "Property underperforming budget by >5%, projecting 6 months of deficits"
+                    # Underperforming - use 3x the base reserve months (most conservative)
+                    months_forward = base_months * 3
+                    forward_reason = f"Property underperforming budget by >5%, projecting {months_forward} months of deficits"
                 elif abs(noi_ytd_variance_pct) < 5:
-                    # On budget but still showing deficit - structural issue, use 4 months
-                    months_forward = 4
-                    forward_reason = "Property on budget but showing structural deficit, projecting 4 months"
+                    # On budget but still showing deficit - structural issue, use 2x base months
+                    months_forward = base_months * 2
+                    forward_reason = f"Property on budget but showing structural deficit, projecting {months_forward} months"
                 else:
-                    # Outperforming but still deficit - likely seasonal, use 3 months
-                    months_forward = 3
-                    forward_reason = "Property outperforming but showing deficit, projecting 3 months minimum"
+                    # Outperforming but still deficit - likely seasonal, use base months
+                    months_forward = base_months
+                    forward_reason = f"Property outperforming but showing deficit, projecting {months_forward} months minimum"
                 
                 projected_multi_month_deficit = monthly_deficit * months_forward
             else:
@@ -370,9 +423,8 @@ class RecommendationEngine:
                 months_forward = 0
                 forward_reason = "No projected deficit, but past working capital crisis requires restoration"
             
-            # Operating reserve buffer: 3 months of debt service + monthly deficit
-            monthly_operating_cost = abs(projected_fcf) if projected_fcf < 0 else (current_fcf if current_fcf > 0 else 50000)
-            operating_reserve_buffer = monthly_operating_cost * 3
+            # Operating reserve buffer: use user-selected reserve_months requirement
+            operating_reserve_buffer = monthly_operating_cost * self.decision_thresholds['cash_reserve_months']
             
             # Need to cover: forward deficits + restore working capital + operating reserves
             contribution_breakdown = {
@@ -381,6 +433,7 @@ class RecommendationEngine:
                 'forward_projected_deficit': projected_multi_month_deficit,
                 'working_capital_restoration': wc_deficit,
                 'operating_reserve_buffer': operating_reserve_buffer,
+                'reserve_months': self.decision_thresholds['cash_reserve_months'],
                 'forward_reason': forward_reason,
                 'total': projected_multi_month_deficit + wc_deficit + operating_reserve_buffer
             }
@@ -445,7 +498,7 @@ class RecommendationEngine:
                    lowest_month_fcf > 0 and months_of_reserves > 10:
                     
                     # Calculate safe distribution:
-                    # Keep enough cash to maintain minimum 6 months of reserves AFTER distribution
+                    # Keep enough cash to maintain minimum reserve_months of reserves AFTER distribution
                     
                     # Calculate monthly operating needs
                     if monthly_debt_service > 0:
@@ -455,15 +508,15 @@ class RecommendationEngine:
                     else:
                         monthly_operating_needs = 50000  # Default estimate
                     
-                    # Required reserve: keep 6 months minimum
-                    required_reserve = monthly_operating_needs * 6
+                    # Required reserve: use dynamic threshold from user selection
+                    required_reserve = monthly_operating_needs * self.decision_thresholds['cash_reserve_months']
                     
                     # Maximum safe distribution: current cash - required reserves
                     max_safe_distribution = cash_balance - required_reserve
                     
                     # Conservative recommendation: lesser of
                     # - 50% of projected 6-month FCF (more conservative than 70%)
-                    # - Available cash after maintaining 6-month reserve
+                    # - Available cash after maintaining required reserve
                     safe_distribution = min(total_fcf * 0.5, max_safe_distribution)
                     
                     # Verify reserves will be adequate after distribution
@@ -475,7 +528,7 @@ class RecommendationEngine:
                     }
                     reserves_after = self._calculate_reserves_after_distribution(balance_data_dict, safe_distribution)
                     
-                    if safe_distribution > 50000 and reserves_after >= 6:
+                    if safe_distribution > 50000 and reserves_after >= self.decision_thresholds['cash_reserve_months']:
                         return ('DISTRIBUTE', safe_distribution, None)
                     else:
                         return ('DO_NOTHING', None, None)
@@ -536,6 +589,7 @@ class RecommendationEngine:
                 forward_deficit = contribution_breakdown.get('forward_projected_deficit', 0)
                 wc_restore = contribution_breakdown.get('working_capital_restoration', 0)
                 reserve_buffer = contribution_breakdown.get('operating_reserve_buffer', 0)
+                reserve_months = contribution_breakdown.get('reserve_months', 6)
                 forward_reason = contribution_breakdown.get('forward_reason', '')
                 
                 # Build detailed breakdown
@@ -549,7 +603,7 @@ class RecommendationEngine:
                     breakdown_parts.append(f"Working Capital Restoration: ${wc_restore:,.0f}")
                 
                 if reserve_buffer > 0:
-                    breakdown_parts.append(f"Operating Reserve Buffer (3mo): ${reserve_buffer:,.0f}")
+                    breakdown_parts.append(f"Operating Reserve Buffer ({reserve_months}mo): ${reserve_buffer:,.0f}")
                 
                 breakdown_text = " + ".join(breakdown_parts) + f" ~ **${amount:,.0f}**"
                 
@@ -571,18 +625,19 @@ class RecommendationEngine:
         else:
             bullets.append(f"**RECOMMENDATION: NO ACTION REQUIRED** - Property cash position is stable and reserves are adequate")
         
-        # Bullet 2: Projected cash flow
+        # Bullet 2: Projected cash flow (OPERATIONAL - excludes accountant's planned distributions/contributions)
+        fcf_disclaimer = "(excluding accountant's planned distributions/contributions)"
+        season = seasonal_factor.get('season', 'Unknown')
+        season_text = f" during {season}" if season != 'Unknown' else ""
+        
         if projected_fcf < 0:
-            season = seasonal_factor.get('season', 'this period')
-            if season == 'Summer Session':
-                season_text = 'expected seasonal pattern'
-            elif season == 'Unknown':
-                season_text = 'requiring attention'
-            else:
-                season_text = f'unusual for {season}'
-            bullets.append(f"Projected Free Cash Flow shows deficit of ${abs(projected_fcf):,.0f} for upcoming month, which is {season_text}")
-        else:
-            bullets.append(f"Projected Free Cash Flow shows surplus of ${projected_fcf:,.0f}, reflecting strong operational performance")
+            bullets.append(f"Projected Free Cash Flow shows deficit of ${abs(projected_fcf):,.0f} {fcf_disclaimer} for upcoming month{season_text}")
+        elif projected_fcf > 50000:  # Meaningful surplus
+            bullets.append(f"Projected Free Cash Flow shows surplus of ${projected_fcf:,.0f} {fcf_disclaimer}{season_text}, reflecting strong operational performance")
+        elif projected_fcf > 0:  # Small positive
+            bullets.append(f"Projected Free Cash Flow of ${projected_fcf:,.0f} {fcf_disclaimer}{season_text} indicates stable operations with minimal surplus")
+        else:  # Exactly 0
+            bullets.append(f"Projected Free Cash Flow breakeven {fcf_disclaimer}{season_text}, indicating operational balance without surplus or deficit")
         
         # Bullet 3: Liquidity position
         reserve_status = "strong" if months_of_reserves > 10 else "adequate" if months_of_reserves > 6 else "tight"
@@ -641,24 +696,24 @@ class RecommendationEngine:
     def _generate_detailed_rationale(self, cash_forecast_data: Dict, income_statement_data: Dict,
                                     balance_sheet_data: Dict, economic_analysis: Dict,
                                     decision: str, amount: float, months_of_reserves: float,
-                                    occupancy_adjustment_note: str = None) -> Dict:
+                                    occupancy_adjustment_note: str = None, reserve_months: int = 6) -> Dict:
         """Generate detailed multi-page analysis"""
         
         return {
-            'cash_forecast_analysis': self._format_cash_forecast_details(cash_forecast_data),
+            'cash_forecast_analysis': self._format_cash_forecast_details(cash_forecast_data, reserve_months),
             'income_statement_analysis': self._format_income_statement_details(income_statement_data),
-            'balance_sheet_analysis': self._format_balance_sheet_details(balance_sheet_data, months_of_reserves),
+            'balance_sheet_analysis': self._format_balance_sheet_details(balance_sheet_data, months_of_reserves, reserve_months),
             'economic_context': self._format_economic_context(economic_analysis),
             'risk_assessment': self._generate_risk_assessment(
-                cash_forecast_data, income_statement_data, balance_sheet_data, economic_analysis
+                cash_forecast_data, income_statement_data, balance_sheet_data, economic_analysis, reserve_months
             ),
             'decision_rationale': self._format_decision_rationale(
                 decision, amount, cash_forecast_data, income_statement_data, 
-                balance_sheet_data, economic_analysis, months_of_reserves
+                balance_sheet_data, economic_analysis, months_of_reserves, reserve_months
             )
         }
     
-    def _format_cash_forecast_details(self, data: Dict) -> str:
+    def _format_cash_forecast_details(self, data: Dict, reserve_months: int = 6) -> str:
         """Format cash forecast section"""
         
         base_analysis = f"""
@@ -666,6 +721,7 @@ CASH FORECAST ANALYSIS
 {'='*78}
 
 Property: {data.get('property_name', 'Unknown')}
+Analysis Parameters: {reserve_months}-Month Operating Reserve Required
 Current Month: {data.get('current_month', 'Unknown')} (Actual)
 Projected Month: {data.get('projected_month', 'Unknown')} (Budget)
 
@@ -780,7 +836,7 @@ INTERPRETATION:
 {self._interpret_income_statement(data)}
 """
     
-    def _format_balance_sheet_details(self, data: Dict, months_of_reserves: float) -> str:
+    def _format_balance_sheet_details(self, data: Dict, months_of_reserves: float, reserve_months: int = 6) -> str:
         """Format balance sheet section"""
         # Extract reporting month from data (with fallback)
         reporting_month = data.get('reporting_month', 'September 2025')
@@ -826,7 +882,7 @@ Debt Position:
 
 Reserve Analysis:
   Months of Reserves:        {months_of_reserves:.1f} months
-  Assessment:                {"STRONG (>10 months)" if months_of_reserves > 10 else "ADEQUATE (6-10 months)" if months_of_reserves > 6 else "TIGHT (<6 months)"}
+  Assessment:                {"STRONG (>10 months)" if months_of_reserves > 10 else f"ADEQUATE ({reserve_months}-10 months)" if months_of_reserves > reserve_months else f"TIGHT (<{reserve_months} months)"}
 
 Month-over-Month Cash Change:
   {prior_month} Cash:          ${data.get('cash_prior_month', 0):,.2f}
@@ -834,7 +890,7 @@ Month-over-Month Cash Change:
   Change:                    ${data.get('cash_balance', 0) - data.get('cash_prior_month', 0):,.2f} ({((data.get('cash_balance', 0) - data.get('cash_prior_month', 0)) / max(data.get('cash_prior_month', 1), 1) * 100):+.1f}%)
 
 INTERPRETATION:
-{self._interpret_balance_sheet(data, months_of_reserves)}
+{self._interpret_balance_sheet(data, months_of_reserves, reserve_months)}
 """
     
     def _format_economic_context(self, data: Dict) -> str:
@@ -849,7 +905,7 @@ ECONOMIC & MARKET CONTEXT
 """
     
     def _generate_risk_assessment(self, cash_data: Dict, income_data: Dict, 
-                                  balance_data: Dict, econ_data: Dict) -> str:
+                                  balance_data: Dict, econ_data: Dict, reserve_months: int = 6) -> str:
         """Generate risk assessment section"""
         risks = []
         
@@ -867,8 +923,8 @@ ECONOMIC & MARKET CONTEXT
         
         # Liquidity risks
         months_reserves = balance_data.get('months_of_reserves', 999)
-        if months_reserves < 6:
-            risks.append("• Reserve levels below recommended 6-month minimum - limits financial flexibility")
+        if months_reserves < reserve_months:
+            risks.append(f"• Reserve levels below recommended {reserve_months}-month minimum - limits financial flexibility")
         
         # Market risks
         if econ_data.get('enrollment_trend') == 'declining':
@@ -889,17 +945,128 @@ Key Risks Identified:
 {chr(10).join(risks)}
 
 Risk Mitigation Strategies:
-• Maintain minimum 6 months operating reserves in cash
+• Maintain minimum {reserve_months} months operating reserves in cash
 • Monitor monthly performance trends for early warning signs
 • Review budget assumptions quarterly and adjust projections
 • Maintain competitive market position through property improvements and resident services
 • Ensure adequate insurance coverage and contingency planning
 """
     
+    def _generate_accountant_comparison(self, decision: str, amount: float, cash_data: Dict, 
+                                        balance_data: Dict, months_of_reserves: float, 
+                                        reserve_months: int) -> str:
+        """Generate comparison between our recommendation and accountant's recommendation"""
+        projected_distributions = cash_data.get('projected_distributions', 0)
+        projected_operational_fcf = cash_data.get('projected_operational_fcf', cash_data.get('projected_fcf', 0))
+        
+        if projected_distributions == 0:
+            return ""  # No accountant recommendation to compare
+        
+        # Determine accountant's recommendation
+        if projected_distributions < 0:
+            accountant_action = "DISTRIBUTION"
+            accountant_amount = abs(projected_distributions)
+        else:
+            accountant_action = "CONTRIBUTION"
+            accountant_amount = projected_distributions
+        
+        # Build comparison section
+        comparison = f"""
+
+COMPARISON WITH ACCOUNTANT'S RECOMMENDATION:
+{'-'*78}
+
+Accountant's Recommendation: {accountant_action} of ${accountant_amount:,.2f}
+Our Recommendation: {decision.replace('_', ' ')} {f'of ${amount:,.2f}' if amount else ''}
+
+"""
+        
+        # Analysis of difference
+        if decision == 'CONTRIBUTE' and accountant_action == "DISTRIBUTION":
+            comparison += f"""RATIONALE FOR DISAGREEMENT:
+While the accountant has planned a distribution, we recommend a contribution because:
+
+• Current reserves ({months_of_reserves:.1f} months) are critically low, below {reserve_months}-month requirement
+• Property is experiencing negative operational cash flow (${projected_operational_fcf:,.2f})
+• Distributing would further deplete already insufficient reserves
+• Working capital position requires restoration before any distributions can be considered
+• The planned distribution appears to ignore the underlying cash flow deficit
+"""
+        elif decision == 'CONTRIBUTE' and accountant_action == "CONTRIBUTION":
+            diff = amount - accountant_amount
+            if diff > 0:
+                comparison += f"""RATIONALE FOR HIGHER CONTRIBUTION:
+We recommend a HIGHER contribution (${diff:,.2f} more) because:
+
+• Our analysis includes {reserve_months}-month reserve requirement based on client risk profile
+• Accountant's contribution may only address immediate deficit without building adequate reserves
+• Property needs both working capital restoration AND reserve buffer
+• Higher contribution prevents need for multiple capital calls in near term
+"""
+            else:
+                comparison += f"""RATIONALE FOR LOWER CONTRIBUTION:
+We recommend a LOWER contribution (${abs(diff):,.2f} less) because:
+
+• Our analysis suggests the accountant's estimate may be conservative
+• Property's operational metrics support a measured approach
+• Recommend monitoring before committing additional capital beyond our assessed need
+"""
+        elif decision == 'DISTRIBUTE' and accountant_action == "DISTRIBUTION":
+            diff = amount - accountant_amount
+            if abs(diff) < 10000:
+                comparison += """ALIGNMENT WITH ACCOUNTANT:
+Our recommendation closely aligns with the accountant's planned distribution.
+Both analyses recognize the property's strong cash position and adequate reserves.
+"""
+            elif diff > 0:
+                comparison += f"""RATIONALE FOR HIGHER DISTRIBUTION:
+We recommend a HIGHER distribution (${diff:,.2f} more) because:
+
+• Reserves significantly exceed {reserve_months}-month minimum requirement
+• Operational performance supports larger distribution while maintaining prudent reserves
+• Excess cash can be returned to investors without compromising financial flexibility
+"""
+            else:
+                comparison += f"""RATIONALE FOR LOWER DISTRIBUTION:
+We recommend a LOWER distribution (${abs(diff):,.2f} less) because:
+
+• More conservative approach maintains greater reserve cushion
+• Market conditions or upcoming expenses warrant retaining additional cash
+• Ensures reserves remain well above minimum {reserve_months}-month requirement
+"""
+        elif decision == 'DO_NOTHING' and accountant_action == "DISTRIBUTION":
+            current_cash = balance_data.get('cash_balance', 0)
+            cash_after_fcf = current_cash + projected_operational_fcf
+            cash_after_distribution = cash_after_fcf - accountant_amount
+            monthly_operating_needs = current_cash / months_of_reserves if months_of_reserves > 0 else 1
+            reserves_after_distribution = cash_after_distribution / monthly_operating_needs if monthly_operating_needs > 0 else 0
+            
+            comparison += f"""RATIONALE FOR RECOMMENDING AGAINST DISTRIBUTION:
+We recommend NO distribution despite the accountant's plan because:
+
+• Current reserves ({months_of_reserves:.1f} months) are BELOW {reserve_months}-month requirement
+• After receiving operational FCF of ${projected_operational_fcf:,.2f}, cash would be ${cash_after_fcf:,.2f}
+• Distributing ${accountant_amount:,.2f} would reduce reserves to {reserves_after_distribution:.1f} months
+• Priority must be building reserves to minimum {reserve_months}-month level
+• Operational cash flow should be RETAINED to strengthen financial position
+• Distributions should be deferred until reserve targets are achieved
+"""
+        elif decision == 'DO_NOTHING' and accountant_action == "CONTRIBUTION":
+            comparison += f"""RATIONALE FOR NO ACTION:
+We recommend NO action while the accountant suggests a contribution because:
+
+• Property reserves ({months_of_reserves:.1f} months) can absorb projected shortfalls
+• Operational variances appear temporary and do not warrant immediate capital injection
+• Natural cash flow should address any minor deficits
+• Recommend monitoring for 1-2 months before committing capital
+"""
+        
+        return comparison
+    
     def _format_decision_rationale(self, decision: str, amount: float, 
                                   cash_data: Dict, income_data: Dict,
                                   balance_data: Dict, econ_data: Dict,
-                                  months_of_reserves: float) -> str:
+                                  months_of_reserves: float, reserve_months: int = 6) -> str:
         """Format the final decision rationale"""
         
         if decision == 'CONTRIBUTE':
@@ -928,7 +1095,7 @@ This recommendation is based on the following factors:
    - Could defer non-essential expenditures to preserve cash
    - Could draw on existing reserves if shortfall is truly temporary
    - Could arrange short-term credit facility instead of equity contribution
-
+{self._generate_accountant_comparison(decision, amount, cash_data, balance_data, months_of_reserves, reserve_months)}
 RECOMMENDED ACTION:
 Wire ${amount:,.2f} to property operating account within 10 business days to ensure
 adequate cash is available for upcoming month obligations.
@@ -955,47 +1122,18 @@ This recommendation is based on the following factors:
 
 3. RESERVE ADEQUACY POST-DISTRIBUTION
    - After distribution, reserves will remain at {self._calculate_reserves_after_distribution(balance_data, amount):.1f} months
-   - This {'exceeds' if self._calculate_reserves_after_distribution(balance_data, amount) >= 6 else 'maintains'} the 6-month minimum reserve requirement
+   - This {'exceeds' if self._calculate_reserves_after_distribution(balance_data, amount) >= reserve_months else 'maintains'} the {reserve_months}-month minimum reserve requirement
    - Property retains adequate cushion for unexpected expenses or market changes
 
 4. MARKET CONDITIONS
    - {self._get_market_condition_text(econ_data)}
-
+{self._generate_accountant_comparison(decision, amount, cash_data, balance_data, months_of_reserves, reserve_months)}
 RECOMMENDED ACTION:
 Process distribution of ${amount:,.2f} to partners according to ownership percentages.
 Maintain minimum ${balance_data.get('cash_balance', 0) - amount:,.2f} in operating account post-distribution.
 """
         
         else:  # DO_NOTHING
-            # Check if accountant has a planned distribution we're contradicting
-            projected_operational_fcf = cash_data.get('projected_operational_fcf', cash_data.get('projected_fcf', 0))
-            projected_distributions = cash_data.get('projected_distributions', 0)
-            
-            accountant_note = ""
-            if projected_distributions < 0:  # Accountant planned a distribution
-                accountant_distribution = abs(projected_distributions)
-                # Calculate what reserves would be after receiving FCF and distributing
-                current_cash = balance_data.get('cash_balance', 0)
-                cash_after_fcf = current_cash + projected_operational_fcf
-                cash_after_distribution = cash_after_fcf - accountant_distribution
-                
-                # Monthly operating needs (to calculate months of reserves)
-                monthly_operating_needs = current_cash / months_of_reserves if months_of_reserves > 0 else 1
-                reserves_after_distribution = cash_after_distribution / monthly_operating_needs if monthly_operating_needs > 0 else 0
-                
-                accountant_note = f"""
-
-NOTE ON ACCOUNTANT'S PLANNED DISTRIBUTION:
-The accountant has planned a distribution of ${accountant_distribution:,.2f} for the upcoming month.
-We recommend AGAINST this distribution for the following reasons:
-
-• Current reserves of {months_of_reserves:.1f} months are BELOW the 6-month minimum requirement
-• After receiving operational FCF of ${projected_operational_fcf:,.2f}, cash would be ${cash_after_fcf:,.2f} ({cash_after_fcf / monthly_operating_needs:.1f} months)
-• Distributing ${accountant_distribution:,.2f} would reduce cash to ${cash_after_distribution:,.2f} ({reserves_after_distribution:.1f} months)
-• Prudent cash management requires building reserves through retained operational cash flow
-• Operational FCF should be RETAINED to strengthen liquidity position toward 6-month minimum
-"""
-            
             return f"""
 DECISION RATIONALE: NO ACTION REQUIRED
 {'='*78}
@@ -1005,8 +1143,8 @@ No capital contribution or distribution is recommended at this time.
 This recommendation is based on the following factors:
 
 1. RESERVE POSITION
-   - Current reserves of ${balance_data.get('cash_balance', 0):,.2f} provide only {months_of_reserves:.1f} months of coverage
-   - This is {'WELL BELOW' if months_of_reserves < 4 else 'BELOW'} the 6-month minimum reserve requirement
+   - Current reserves of ${balance_data.get('cash_balance', 0):,.2f} provide {months_of_reserves:.1f} months of coverage
+   - This is {'WELL BELOW' if months_of_reserves < reserve_months else ('BELOW' if months_of_reserves < reserve_months * 1.5 else 'ABOVE')} the {reserve_months}-month minimum reserve requirement
    - {'Projected deficit is minor and well within reserve capacity' if cash_data.get('projected_fcf', 0) < 0 else 'Projected operational cash flow should be retained to build reserves'}
 
 2. OPERATIONAL PERFORMANCE
@@ -1014,17 +1152,17 @@ This recommendation is based on the following factors:
    - {'Any variances from budget are not material to cash position' if abs(income_data.get('noi_ytd_variance_pct', 0)) < 10 else 'Performance variances warrant monitoring but not immediate action'}
 
 3. PRUDENT CASH MANAGEMENT
-   - Priority is building reserves to minimum 6-month level
+   - Priority is building reserves to minimum {reserve_months}-month level
    - Distributions should be deferred until reserve target is achieved
    - Strengthening liquidity position provides financial flexibility for unexpected expenses
 
 4. MARKET CONDITIONS
    - {self._get_market_condition_text(econ_data)}
-{accountant_note}
+{self._generate_accountant_comparison(decision, amount, cash_data, balance_data, months_of_reserves, reserve_months)}
 RECOMMENDED ACTION:
 Continue normal operations and RETAIN operational cash flow to build reserves.
-Monitor monthly performance and reassess distribution potential once reserves reach 6+ months.
-{'Consider distribution if surplus pattern continues AND reserves exceed 6 months.' if cash_data.get('projected_fcf', 0) > 50000 else ''}
+Monitor monthly performance and reassess distribution potential once reserves reach {reserve_months}+ months.
+{'Consider distribution if surplus pattern continues AND reserves exceed ' + str(reserve_months) + ' months.' if cash_data.get('projected_fcf', 0) > 50000 else ''}
 {'Review budget assumptions if deficit pattern emerges.' if cash_data.get('projected_fcf', 0) < 0 else ''}
 """
     
@@ -1076,11 +1214,11 @@ Monitor monthly performance and reassess distribution potential once reserves re
             # Between -5 and +5 but monthly variance is significant
             return f"Operating performance tracking close to budget YTD ({noi_ytd_var:+.1f}%), though recent month shows {noi_month_var:+.1f}% variance requiring attention."
     
-    def _interpret_balance_sheet(self, data: Dict, months_of_reserves: float) -> str:
+    def _interpret_balance_sheet(self, data: Dict, months_of_reserves: float, reserve_months: int = 6) -> str:
         """Interpret balance sheet data"""
         if months_of_reserves > 10:
             return f"Liquidity position is very strong with {months_of_reserves:.1f} months of reserves. The property has ample cushion to absorb unexpected expenses or temporary cash flow disruptions. Current ratio of {(data.get('cash_balance', 0) + data.get('accounts_receivable', 0)) / max(data.get('current_liabilities', 1), 1):.2f}:1 exceeds recommended minimum of 1.5:1."
-        elif months_of_reserves > 6:
+        elif months_of_reserves > reserve_months:
             return f"Liquidity position is adequate with {months_of_reserves:.1f} months of reserves. The property can handle normal business fluctuations and minor unexpected expenses. Maintain current reserve levels."
         else:
             return f"Liquidity position is tight with only {months_of_reserves:.1f} months of reserves. Property has limited cushion for unexpected expenses. Avoid distributions and build reserves through retained cash flow."

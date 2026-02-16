@@ -74,7 +74,9 @@ class FileProcessor:
                            cash_forecast_path: str,
                            income_statement_path: str,
                            balance_sheet_path: str,
-                           property_info: Dict[str, Any]) -> Dict[str, Any]:
+                           property_info: Dict[str, Any],
+                           reserve_months: int = 6,
+                           wc_target_ratio: float = 1.0) -> Dict[str, Any]:
         """
         Process all three required files and generate comprehensive recommendation
         
@@ -83,6 +85,8 @@ class FileProcessor:
             income_statement_path: Path to PDF income statement
             balance_sheet_path: Path to PDF balance sheet
             property_info: Dictionary with property information (name, university, address, etc.)
+            reserve_months: Required months of operating cash reserve (default: 6)
+            wc_target_ratio: Target current ratio for working capital restoration (default: 1.0)
             
         Returns:
             Complete analysis with decision, executive summary, and detailed rationale
@@ -137,7 +141,8 @@ class FileProcessor:
                 city=property_info.get('city', 'Unknown'),
                 state=property_info.get('state', 'Unknown'),
                 zip_code=property_info.get('zip', ''),
-                current_month=cash_data.get('current_month', 'Unknown')
+                current_month=cash_data.get('current_month', 'Unknown'),
+                projected_month=cash_data.get('projected_month', 'Unknown')
             )
             
             # Step 5: Generate recommendation
@@ -146,7 +151,9 @@ class FileProcessor:
                 cash_forecast_data=cash_data,
                 income_statement_data=income_data,
                 balance_sheet_data=balance_data,
-                economic_analysis=economic_data
+                economic_analysis=economic_data,
+                reserve_months=reserve_months,
+                wc_target_ratio=wc_target_ratio
             )
             
             return {
@@ -235,7 +242,25 @@ class FileProcessor:
             # Find FCF and distribution rows using detected label column
             fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=label_col)
             actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=label_col)
-            forecasted_dist_row_idx = self._find_row_by_label(df, ['FORECASTED (Distributions)', 'FORECASTED  (Distributions)'], column=label_col)
+            forecasted_dist_row_idx = self._find_row_by_label(df, [
+                'FORECASTED  (Distributions)/Contributions',
+                'FORECASTED (Distributions)/Contributions', 
+                'FORECASTED  (Distributions)', 
+                'FORECASTED (Distributions)'
+            ], column=label_col)
+            
+            if forecasted_dist_row_idx is None:
+                logger.warning(f"⚠️  Could not find 'FORECASTED (Distributions)' row - trying alternative labels")
+                # Try more variations
+                forecasted_dist_row_idx = self._find_row_by_label(df, ['Forecasted (Distributions)', 'FORECASTED(Distributions)', 'Forecasted Distributions'], column=label_col)
+                
+                # If still not found, log all row labels to help debug
+                if forecasted_dist_row_idx is None:
+                    logger.warning(f"⚠️  Still not found! Here are all row labels in column {label_col}:")
+                    for idx in range(min(50, len(df))):
+                        label = df.iloc[idx, label_col]
+                        if pd.notna(label) and str(label).strip():
+                            logger.warning(f"  Row {idx}: '{label}'")
             
             logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
             
@@ -289,15 +314,34 @@ class FileProcessor:
             
             logger.info(f"Current month: {current_month_name}, Projected month: {projected_month_name}")
             
+            # Find the first budget column that has actual data (non-NaN FCF or non-zero distribution)
+            # This is the "projected month" column we'll use for ALL projected values
+            projected_month_col_idx = next_month_idx  # Default to first budget month
+            if budget_month_indices:
+                for budget_idx in budget_month_indices:
+                    # Check if this column has FCF data
+                    has_fcf = budget_idx < len(fcf_row) and pd.notna(fcf_row[budget_idx])
+                    # Check if this column has distribution data
+                    has_dist = (forecasted_distributions_row and 
+                               budget_idx < len(forecasted_distributions_row) and 
+                               pd.notna(forecasted_distributions_row[budget_idx]) and 
+                               forecasted_distributions_row[budget_idx] != 0)
+                    
+                    if has_fcf or has_dist:
+                        projected_month_col_idx = budget_idx
+                        break
+            
+            # Extract current month values
             current_fcf = fcf_row[current_month_idx] if current_month_idx is not None else 0
-            projected_fcf = fcf_row[next_month_idx] if next_month_idx is not None else 0
-            
             current_occupancy = actual_occ_row[current_month_idx] if current_month_idx is not None else 0
-            projected_occupancy = budgeted_occ_row[next_month_idx] if next_month_idx is not None else 0
-            
-            # Use ACTUAL distributions for current (actual) month, FORECASTED for projected (budget) month
             current_distributions = actual_distributions_row[current_month_idx] if current_month_idx is not None and actual_distributions_row else 0
-            projected_distributions = forecasted_distributions_row[next_month_idx] if next_month_idx is not None and forecasted_distributions_row else 0
+            
+            # Extract projected month values - ALL from the same column
+            projected_fcf = fcf_row[projected_month_col_idx] if projected_month_col_idx is not None and projected_month_col_idx < len(fcf_row) else 0
+            projected_occupancy = budgeted_occ_row[projected_month_col_idx] if projected_month_col_idx is not None and projected_month_col_idx < len(budgeted_occ_row) else 0
+            projected_distributions = forecasted_distributions_row[projected_month_col_idx] if (projected_month_col_idx is not None and 
+                                                                                                forecasted_distributions_row and 
+                                                                                                projected_month_col_idx < len(forecasted_distributions_row)) else 0
             
             logger.debug(f"Raw values - FCF: {current_fcf}/{projected_fcf}, Occ: {current_occupancy}/{projected_occupancy}, Dist: {current_distributions}/{projected_distributions}")
             
@@ -625,7 +669,7 @@ class FileProcessor:
             }
     
     def get_economic_context(self, property_name: str, university: str, city: str, 
-                            state: str, zip_code: str, current_month: str) -> Dict[str, Any]:
+                            state: str, zip_code: str, current_month: str, projected_month: str) -> Dict[str, Any]:
         """
         Get economic and market context using OpenAI API
         """
@@ -642,11 +686,12 @@ class FileProcessor:
                 current_month=current_month
             )
             
-            # Get seasonal factor
+            # Get seasonal factor for PROJECTED month (not current month)
+            # We're analyzing projected FCF, so we need the season of the projected period
             # Handle different month formats: "September 2025", "Jan-2025", "September"
-            if '-' in current_month:
+            if '-' in projected_month:
                 # Format like "Jan-2025" or "Sept-2025" - extract month abbreviation
-                month_abbr = current_month.split('-')[0].strip()
+                month_abbr = projected_month.split('-')[0].strip()
                 # Convert abbreviation to full name
                 month_map = {
                     'jan': 'January', 'feb': 'February', 'mar': 'March', 'apr': 'April',
@@ -655,13 +700,13 @@ class FileProcessor:
                     'oct': 'October', 'nov': 'November', 'dec': 'December'
                 }
                 month_name = month_map.get(month_abbr.lower(), month_abbr)
-            elif ' ' in current_month:
+            elif ' ' in projected_month:
                 # Format like "September 2025" - extract first word
-                month_name = current_month.split()[0]
+                month_name = projected_month.split()[0]
             else:
-                month_name = current_month
+                month_name = projected_month
                 
-            print(f"DEBUG: Extracting month for seasonal factor: '{month_name}' from '{current_month}'")
+            print(f"DEBUG: Extracting month for seasonal factor: '{month_name}' from '{projected_month}'")
             seasonal_factor = self.economic_analyzer.get_seasonal_factor(month_name)
             print(f"DEBUG: Seasonal factor result: {seasonal_factor}")
             
