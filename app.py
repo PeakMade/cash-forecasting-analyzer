@@ -549,7 +549,10 @@ def analyze_files():
         }
         wc_target_ratio = risk_to_wc_target.get(client_risk.lower(), 1.0)
         
-        app.logger.info(f"Client Risk: {client_risk.upper()} → Reserve Months: {reserve_months}, WC Target Ratio: {wc_target_ratio}")
+        # Log risk selection (using both print and logger to ensure visibility)
+        risk_log_msg = f"=== CLIENT RISK SELECTION: {client_risk.upper()} → Reserve Months: {reserve_months}, WC Target Ratio: {wc_target_ratio} ==="
+        print(risk_log_msg)
+        app.logger.info(risk_log_msg)
         
         # Capture filenames for logging
         uploaded_filenames = ', '.join([

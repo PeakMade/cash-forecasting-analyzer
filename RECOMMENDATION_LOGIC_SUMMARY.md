@@ -122,32 +122,24 @@ When a working capital crisis is detected (working capital < -$50K), the system 
 **Formula:**
 ```
 Forward Deficit Coverage = Average Monthly Deficit × Months Forward
+
+Where:
+    Months Forward = User's Risk Selection (reserve months directly)
 ```
 
-**Months Forward Calculation (based on performance AND risk):**
-```
-Base Months = User's Risk Selection (reserve months)
-
-IF NOI YTD Variance < -5% (underperforming):
-    Months Forward = Base Months × 3
-    
-ELSE IF NOI YTD Variance within ±5% (on budget):
-    Months Forward = Base Months × 2
-    
-ELSE (outperforming):
-    Months Forward = Base Months × 1
-```
+**Philosophy:**
+The accountant selects the risk level based on their complete knowledge of the property, including performance, market conditions, and investor expectations. We use their risk selection **directly** without additional multipliers, giving them full control over the recommendation.
 
 **Examples:**
-- **Low Risk (2 months base):**
-  - Underperforming: 2 × 3 = **6 months**
-  - On budget: 2 × 2 = **4 months**
-  - Outperforming: 2 × 1 = **2 months**
+- **Low Risk (2 months):** Covers **2 months** of deficits
+- **Medium Risk (4 months):** Covers **4 months** of deficits
+- **High Risk (6 months):** Covers **6 months** of deficits
 
-- **High Risk (6 months base):**
-  - Underperforming: 6 × 3 = **18 months**
-  - On budget: 6 × 2 = **12 months**
-  - Outperforming: 6 × 1 = **6 months**
+**Performance Context:**
+While we don't multiply based on performance, the detailed analysis shows:
+- NOI variance (underperforming/on budget/outperforming)
+- This transparency helps accountants choose the appropriate risk level
+- They can re-run with different risk selections if needed
 
 **Monthly Deficit Value:**
 - Uses **multi-month average operational FCF** if 4+ budget months available
@@ -163,6 +155,7 @@ ELSE (outperforming):
 **Formula:**
 ```
 WC Restoration = MAX(0, Target Cash - Current Cash)
+```
 
 Where:
     Target Cash = Current Liabilities × WC Target Ratio
@@ -217,12 +210,12 @@ TOTAL CONTRIBUTION = Forward Deficit Coverage
 
 **Final rounding:** Rounded UP to nearest $10,000 for practicality
 
-**Example Scenario (Campus Creek, Low Risk, Underperforming):**
+**Example Scenario (Campus Creek, Low Risk):**
 ```
 1. Forward Deficit Coverage:
    - Average Monthly Deficit: $116,255
-   - Months Forward: 2 × 3 = 6 months (underperforming)
-   - Coverage: $116,255 × 6 = $697,530
+   - Months Forward: 2 months (Low Risk selection)
+   - Coverage: $116,255 × 2 = $232,510
 
 2. Working Capital Restoration:
    - Current Liabilities: $478,794
@@ -236,8 +229,8 @@ TOTAL CONTRIBUTION = Forward Deficit Coverage
    - Reserve Months: 2
    - Buffer: $116,255 × 2 = $232,510
 
-TOTAL: $697,530 + $209,947 + $232,510 = $1,139,987
-Rounded: $1,140,000
+TOTAL: $232,510 + $209,947 + $232,510 = $674,967
+Rounded: $680,000
 ```
 
 ---
@@ -346,15 +339,17 @@ All risk-based thresholds are configured via environment variables:
 
 ## **Example Impact of Risk Selection**
 
-**Property:** Campus Creek Cottages (underperforming >5%, in WC crisis)
+**Property:** Campus Creek Cottages (showing differences across risk levels)
 
 | Risk Level | Reserve Months | WC Target | Deficit Months | Total Contribution |
 |------------|---------------|-----------|----------------|-------------------|
-| **Low**    | 2             | 0.5       | 6              | **~$1.14M**       |
-| **Medium** | 4             | 0.75      | 12             | **~$2.15M**       |
-| **High**   | 6             | 1.0       | 18             | **~$3.18M**       |
+| **Low**    | 2             | 0.5       | 2              | **~$680K**        |
+| **Medium** | 4             | 0.75      | 4              | **~$1.1M**        |
+| **High**   | 6             | 1.0       | 6              | **~$1.5M**        |
 
-**Key Insight:** Risk selection allows users to calibrate conservatism based on property characteristics, investor expectations, and market conditions.
+**Key Insight:** Risk selection gives accountants direct control over contribution size. They can select the risk level based on their complete knowledge of property conditions, investor expectations, and market dynamics. The system uses their selection directly without additional multipliers.
+
+**Performance Context:** The system still shows performance metrics (NOI variance, occupancy trends) in the detailed rationale so accountants understand what drove the contribution recommendation - but these metrics don't multiply the risk selection. This allows accountants to iterate by re-running with a different risk level if needed.
 
 ---
 
@@ -385,7 +380,7 @@ All risk-based thresholds are configured via environment variables:
 
 1. **Working Capital Targets:** Are the current ratio targets (0.5/0.75/1.0) appropriate for student housing properties? Should Low Risk be even lower?
 
-2. **Deficit Projection Multipliers:** The 1x/2x/3x multipliers for performance scaling - do these align with historical recovery timelines?
+2. **Risk-Based Philosophy:** The system now uses risk selection directly without performance multipliers. Does this give accountants the right level of control? Should we add other risk configurations?
 
 3. **Reserve Month Ranges:** Current range is 2-6 months. Should this be wider (e.g., 1-9 months)?
 
@@ -397,4 +392,4 @@ All risk-based thresholds are configured via environment variables:
 
 **Prepared by:** Cash Forecast Analyzer Development Team  
 **Date:** February 2026  
-**Version:** 2.0 (Multi-Month Averaging Update)
+**Version:** 2.1 (Risk-Based Control Update)

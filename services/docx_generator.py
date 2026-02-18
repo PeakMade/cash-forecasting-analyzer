@@ -82,6 +82,27 @@ class WordDocumentGenerator:
         
         doc.add_paragraph()  # Spacing
         
+        # Analysis Parameters section
+        params_heading = doc.add_heading('ANALYSIS PARAMETERS', level=2)
+        params_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        risk_selection = recommendation.get('risk_selection', 'UNKNOWN')
+        reserve_months = recommendation.get('reserve_months', 6)
+        wc_target = recommendation.get('wc_target_ratio', 1.0)
+        
+        params_para = doc.add_paragraph()
+        params_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        params_text = f"Risk Selection: {risk_selection}\n"
+        params_text += f"Reserve Months: {reserve_months} months\n"
+        params_text += f"Working Capital Target: {wc_target}:1 ratio"
+        
+        params_run = params_para.add_run(params_text)
+        params_run.font.size = Pt(14)
+        params_run.font.color.rgb = self.dark_gray
+        
+        doc.add_paragraph()  # Spacing
+        
         # Executive Decision
         decision = recommendation.get('decision', 'DO_NOTHING')
         amount = recommendation.get('amount')

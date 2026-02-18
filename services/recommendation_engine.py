@@ -159,6 +159,9 @@ class RecommendationEngine:
             reserve_months=reserve_months
         )
         
+        # Get risk label for display
+        risk_label = self._get_risk_label()
+        
         return {
             'decision': decision,
             'amount': rounded_amount,
@@ -168,6 +171,9 @@ class RecommendationEngine:
             'analysis_month': cash_forecast_data.get('current_month', 'Unknown'),
             'projected_month': cash_forecast_data.get('projected_month', 'Unknown'),
             'occupancy_adjusted': occupancy_adjusted_fcf != projected_fcf,
+            'risk_selection': risk_label,
+            'reserve_months': reserve_months,
+            'wc_target_ratio': wc_target_ratio,
             'multi_month_analysis': multi_month_analysis  # NEW: Include 6-month analysis in output
         }
     
@@ -395,28 +401,22 @@ class RecommendationEngine:
                 print(f"DEBUG: No multi-month data, using single month projected_operational_fcf: {projected_operational_fcf:,.2f}")
                 print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}, monthly_operating_cost={monthly_operating_cost:,.2f}")
             
-            # CRITICAL: If NOI is underperforming or there's persistent deficit, project forward
-            # Use user's risk tolerance (reserve_months) as the base forward projection period
-            # Adjust based on property performance
-            base_months = self.decision_thresholds['cash_reserve_months']
+            # Use user's risk tolerance (reserve_months) directly for forward deficit projection
+            # The accountant selects risk level based on their knowledge of property performance,
+            # so we don't apply additional multipliers that would double-penalize
+            months_forward = self.decision_thresholds['cash_reserve_months']
             
             if monthly_deficit > 0:
-                # If property showing deficit, assume it continues for multiple months
-                # Scale the projection based on performance severity
-                if noi_ytd_variance_pct < -5:
-                    # Underperforming - use 3x the base reserve months (most conservative)
-                    months_forward = base_months * 3
-                    forward_reason = f"Property underperforming budget by >5%, projecting {months_forward} months of deficits"
-                elif abs(noi_ytd_variance_pct) < 5:
-                    # On budget but still showing deficit - structural issue, use 2x base months
-                    months_forward = base_months * 2
-                    forward_reason = f"Property on budget but showing structural deficit, projecting {months_forward} months"
-                else:
-                    # Outperforming but still deficit - likely seasonal, use base months
-                    months_forward = base_months
-                    forward_reason = f"Property outperforming but showing deficit, projecting {months_forward} months minimum"
-                
+                # Property showing deficit - cover for the risk-selected period
                 projected_multi_month_deficit = monthly_deficit * months_forward
+                
+                # Provide context about performance for transparency (shown in detailed analysis)
+                if noi_ytd_variance_pct < -5:
+                    forward_reason = f"Property underperforming budget by >5%, covering {months_forward} months of deficits per {self._get_risk_label()} risk selection"
+                elif abs(noi_ytd_variance_pct) < 5:
+                    forward_reason = f"Property on budget but showing deficit, covering {months_forward} months per {self._get_risk_label()} risk selection"
+                else:
+                    forward_reason = f"Property outperforming but showing deficit, covering {months_forward} months per {self._get_risk_label()} risk selection"
             else:
                 # No deficit projected, but working capital crisis exists from past issues
                 projected_multi_month_deficit = 0
@@ -716,12 +716,24 @@ class RecommendationEngine:
     def _format_cash_forecast_details(self, data: Dict, reserve_months: int = 6) -> str:
         """Format cash forecast section"""
         
+        # Get risk label
+        risk_label = self._get_risk_label()
+        wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
+        
         base_analysis = f"""
+ANALYSIS PARAMETERS
+{'='*78}
+
+Risk Selection: {risk_label}
+  - Reserve Months: {reserve_months} months
+  - Working Capital Target: {wc_target_ratio}:1 ratio
+
+{'='*78}
+
 CASH FORECAST ANALYSIS
 {'='*78}
 
 Property: {data.get('property_name', 'Unknown')}
-Analysis Parameters: {reserve_months}-Month Operating Reserve Required
 Current Month: {data.get('current_month', 'Unknown')} (Actual)
 Projected Month: {data.get('projected_month', 'Unknown')} (Budget)
 
@@ -733,13 +745,17 @@ Current Month Free Cash Flow: ${data.get('current_fcf', 0):,.2f}
         projected_operational_fcf = data.get('projected_operational_fcf', data.get('projected_fcf', 0))
         
         if projected_distributions != 0:
+            # Determine label based on sign: positive = contribution (in), negative = distribution (out)
+            before_label = "before contribution" if projected_distributions > 0 else "before distribution"
+            after_label = "after their contribution" if projected_distributions > 0 else "after their distribution"
+            
             base_analysis += f"""
 Projected Month Analysis:
-  Operational FCF (before distribution): ${projected_operational_fcf:,.2f}
+  Operational FCF ({before_label}): ${projected_operational_fcf:,.2f}
   
 Accountant's Recommendation:
   Planned Distribution/Contribution:     ${projected_distributions:,.2f}
-  Net FCF (after their distribution):    ${data.get('projected_fcf', 0):,.2f}
+  Net FCF ({after_label}):    ${data.get('projected_fcf', 0):,.2f}
   
 Variance from Current Month: ${projected_operational_fcf - data.get('current_fcf', 0):,.2f}
 """
@@ -785,9 +801,12 @@ Analyzing next {num_months} month{'s' if num_months > 1 else ''} of projections:
                 operational_fcf = month.get('operational_fcf', month['fcf'])
                 status_icon = "✓" if operational_fcf > 0 else "✗"
                 
-                # Show both values if there's a forecasted distribution
-                if month.get('forecasted_distribution', 0) != 0:
-                    projection_section += f"  {i}. {month['month']:<15} Operational FCF: ${operational_fcf:>12,.2f}  (After Dist: ${month['fcf']:>12,.2f})  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
+                # Show both values if there's a forecasted distribution/contribution
+                forecasted_dist = month.get('forecasted_distribution', 0)
+                if forecasted_dist != 0:
+                    # Determine label based on sign: negative = distribution (out), positive = contribution (in)
+                    dist_label = "After Contribution:" if forecasted_dist > 0 else "After Distribution:"
+                    projection_section += f"  {i}. {month['month']:<15} Operational FCF: ${operational_fcf:>12,.2f}  ({dist_label} ${month['fcf']:>12,.2f})  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
                 else:
                     projection_section += f"  {i}. {month['month']:<15} FCF: ${month['fcf']:>12,.2f}  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
             
@@ -1174,6 +1193,16 @@ Monitor monthly performance and reassess distribution potential once reserves re
             return "University enrollment declining - conservative cash management prudent"
         else:
             return "Market conditions stable with normal seasonal patterns expected"
+    
+    def _get_risk_label(self) -> str:
+        """Get user-friendly risk level label based on reserve months"""
+        reserve_months = self.decision_thresholds.get('cash_reserve_months', 6)
+        if reserve_months <= 2:
+            return "Low Risk"
+        elif reserve_months <= 4:
+            return "Medium Risk"
+        else:
+            return "High Risk"
     
     def _interpret_cash_forecast(self, data: Dict) -> str:
         """Interpret cash forecast data"""
