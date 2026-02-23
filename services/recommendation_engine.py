@@ -62,6 +62,19 @@ class RecommendationEngine:
         projected_operational_fcf = cash_forecast_data.get('projected_operational_fcf', projected_fcf)  # Use operational if available
         current_fcf = cash_forecast_data.get('current_fcf', 0)
         cash_balance = balance_sheet_data.get('cash_balance', 0)
+        accounts_receivable = balance_sheet_data.get('accounts_receivable', 0)
+        prepaid_expenses = balance_sheet_data.get('prepaid_expenses', 0)
+        other_current_assets = balance_sheet_data.get('other_current_assets', 0)
+        current_assets = cash_balance + accounts_receivable + prepaid_expenses + other_current_assets  # Total current assets
+        
+        # Debug: Show current assets breakdown
+        print(f"DEBUG: Current Assets Breakdown:")
+        print(f"  Cash: ${cash_balance:,.2f}")
+        print(f"  Accounts Receivable: ${accounts_receivable:,.2f}")
+        print(f"  Prepaid Expenses: ${prepaid_expenses:,.2f}")
+        print(f"  Other Current Assets: ${other_current_assets:,.2f}")
+        print(f"  Total Current Assets: ${current_assets:,.2f}")
+        
         current_liabilities = balance_sheet_data.get('current_liabilities', 0)
         monthly_debt_service = balance_sheet_data.get('monthly_debt_service', 0)
         
@@ -103,7 +116,7 @@ class RecommendationEngine:
             cash_balance, monthly_debt_service, current_liabilities, monthly_expenses
         )
         
-        working_capital = cash_balance - current_liabilities
+        working_capital = current_assets - current_liabilities
         
         # Determine decision using ADJUSTED cash flow and multi-month analysis
         decision, amount, contribution_breakdown = self._make_decision(
@@ -115,10 +128,12 @@ class RecommendationEngine:
             working_capital=working_capital,
             noi_ytd_variance_pct=noi_ytd_variance_pct,
             monthly_debt_service=monthly_debt_service,
+            monthly_expenses=monthly_expenses,  # NEW: Pass monthly expenses
             current_liabilities=current_liabilities,
             seasonal_factor=seasonal_factor,
             enrollment_trend=enrollment_trend,
-            multi_month_analysis=multi_month_analysis  # NEW: Pass multi-month data
+            multi_month_analysis=multi_month_analysis,  # NEW: Pass multi-month data
+            current_assets=current_assets  # NEW: Pass current assets for proper WC calculation
         )
         
         # Round amount to nearest $10,000 BEFORE generating summaries
@@ -139,6 +154,7 @@ class RecommendationEngine:
             enrollment_trend=enrollment_trend,
             working_capital=working_capital,
             current_liabilities=current_liabilities,
+            current_assets=current_assets,
             contribution_breakdown=contribution_breakdown
         )
         
@@ -232,68 +248,87 @@ class RecommendationEngine:
         """
         Analyze multi-month cash flow projection using operational FCF
         
+        IMPORTANT: Excel FCF values represent cumulative ending balances.
+        We ALWAYS calculate month-over-month deltas (incremental changes) for forward projection.
+        
         Returns:
             dict: {
                 'total_fcf': Total cumulative operational FCF over period,
-                'average_fcf': Average monthly operational FCF,
+                'average_fcf': Average monthly operational FCF delta (month-over-month change),
                 'lowest_month': {'month': str, 'fcf': float},
                 'highest_month': {'month': str, 'fcf': float},
                 'positive_months': int,
                 'negative_months': int,
                 'trend': 'INCREASING' | 'DECREASING' | 'STABLE',
-                'all_positive': bool
+                'all_positive': bool,
+                'months_analyzed': int,
+                'monthly_deltas': List[float]
             }
         """
         if not projected_months:
             return None
         
-        # Use operational FCF (before distributions) for analysis
-        total_fcf = sum(m.get('operational_fcf', m['fcf']) for m in projected_months)
-        average_fcf = total_fcf / len(projected_months) if projected_months else 0
+        # Extract FCF ending balances from Excel (these are cumulative)
+        fcf_values = [m.get('operational_fcf', m['fcf']) for m in projected_months]
+        print(f"DEBUG: FCF ending balances: {[f'${v:,.2f}' for v in fcf_values]}")
         
-        # Find lowest and highest months based on operational FCF
-        lowest_month = min(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
-        highest_month = max(projected_months, key=lambda x: x.get('operational_fcf', x['fcf']))
+        # ALWAYS calculate month-over-month deltas (incremental changes)
+        # The Excel shows ending balances, we need the change from month to month
+        # With N months, we get (N-1) deltas (the changes between consecutive months)
+        monthly_deltas = []
+        for i in range(1, len(fcf_values)):
+            delta = fcf_values[i] - fcf_values[i-1]
+            monthly_deltas.append(delta)
         
-        # Count positive/negative months based on operational FCF
-        positive_months = sum(1 for m in projected_months if m.get('operational_fcf', m['fcf']) > 0)
-        negative_months = sum(1 for m in projected_months if m.get('operational_fcf', m['fcf']) < 0)
+        print(f"DEBUG: Monthly deltas (month-over-month changes): {[f'${v:,.2f}' for v in monthly_deltas]}")
+        print(f"DEBUG: Calculated {len(monthly_deltas)} deltas from {len(fcf_values)} ending balances")
         
-        # Determine trend (compare first half to second half)
-        if len(projected_months) >= 4:
-            half_point = len(projected_months) // 2
-            if half_point == 0:
-                trend = 'STABLE'
+        # Since we now calculate true month-over-month changes (with contributions removed),
+        # all deltas represent real operational cash flow and should be included in averaging
+        deltas_to_average = monthly_deltas.copy()
+        
+        # Calculate average from all deltas
+        total_fcf = sum(monthly_deltas)
+        average_fcf = sum(deltas_to_average) / len(deltas_to_average) if deltas_to_average else 0
+        
+        print(f"DEBUG: Total deltas: ${total_fcf:,.2f}, Average monthly delta: ${average_fcf:,.2f}")
+        print(f"DEBUG: Using ALL {len(monthly_deltas)} deltas for forward projection")
+        
+        # Find lowest and highest months based on deltas (not ending balances)
+        lowest_delta_idx = monthly_deltas.index(min(monthly_deltas))
+        highest_delta_idx = monthly_deltas.index(max(monthly_deltas))
+        
+        # Count positive/negative deltas
+        positive_months = sum(1 for d in monthly_deltas if d > 0)
+        negative_months = sum(1 for d in monthly_deltas if d < 0)
+        
+        # Determine trend (compare first half to second half of deltas)
+        if len(monthly_deltas) >= 4:
+            half_point = len(monthly_deltas) // 2
+            first_half_avg = sum(monthly_deltas[:half_point]) / half_point
+            second_half_avg = sum(monthly_deltas[half_point:]) / (len(monthly_deltas) - half_point)
+            
+            # Calculate percentage difference
+            if first_half_avg != 0:
+                diff_pct = ((second_half_avg - first_half_avg) / abs(first_half_avg)) * 100
             else:
-                first_half = projected_months[:half_point]
-                second_half = projected_months[half_point:]
-                
-                first_half_sum = sum(m.get('operational_fcf', m['fcf']) for m in first_half)
-                second_half_sum = sum(m.get('operational_fcf', m['fcf']) for m in second_half)
-                
-                first_half_avg = first_half_sum / len(first_half) if len(first_half) > 0 else 0
-                second_half_avg = second_half_sum / len(second_half) if len(second_half) > 0 else 0
-                
-                # Calculate percentage difference, handling zero values
-                if first_half_avg != 0:
-                    diff_pct = ((second_half_avg - first_half_avg) / abs(first_half_avg)) * 100
-                else:
-                    diff_pct = 0
-                
-                if diff_pct > 10:
-                    trend = 'INCREASING'
-                elif diff_pct < -10:
-                    trend = 'DECREASING'
-                else:
-                    trend = 'STABLE'
+                diff_pct = 0
+            
+            if diff_pct > 10:
+                trend = 'IMPROVING'  # Deficits getting smaller or surpluses getting larger
+            elif diff_pct < -10:
+                trend = 'DETERIORATING'  # Deficits getting larger or surpluses getting smaller
+            else:
+                trend = 'STABLE'
         else:
             trend = 'STABLE'
         
         return {
             'total_fcf': total_fcf,
             'average_fcf': average_fcf,
-            'lowest_month': {'month': lowest_month['month'], 'fcf': lowest_month.get('operational_fcf', lowest_month['fcf'])},
-            'highest_month': {'month': highest_month['month'], 'fcf': highest_month.get('operational_fcf', highest_month['fcf'])},
+            'monthly_deltas': monthly_deltas,
+            'lowest_month': {'month': projected_months[lowest_delta_idx]['month'], 'fcf': monthly_deltas[lowest_delta_idx]},
+            'highest_month': {'month': projected_months[highest_delta_idx]['month'], 'fcf': monthly_deltas[highest_delta_idx]},
             'positive_months': positive_months,
             'negative_months': negative_months,
             'trend': trend,
@@ -352,7 +387,8 @@ class RecommendationEngine:
     def _make_decision(self, projected_fcf: float, current_fcf: float, cash_balance: float,
                       months_of_reserves: float, working_capital: float, noi_ytd_variance_pct: float,
                       seasonal_factor: Dict, enrollment_trend: str, multi_month_analysis: Dict = None,
-                      monthly_debt_service: float = 0, current_liabilities: float = 0,
+                      monthly_debt_service: float = 0, monthly_expenses: float = 0,
+                      current_liabilities: float = 0, current_assets: float = 0,
                       projected_operational_fcf: float = None) -> Tuple[str, float, Dict]:
         """
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
@@ -379,27 +415,33 @@ class RecommendationEngine:
             # 3. Operating reserve buffer (based on user-selected reserve_months)
             
             # Calculate working capital deficit based on user's risk tolerance
-            # Target: cash_balance = current_liabilities * wc_target_ratio
+            # Target: current_assets = current_liabilities * wc_target_ratio
             wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
-            target_cash = current_liabilities * wc_target_ratio
-            wc_deficit = max(0, target_cash - cash_balance)
+            target_current_assets = current_liabilities * wc_target_ratio
+            wc_deficit = max(0, target_current_assets - current_assets)
             
             print(f"DEBUG: Working Capital Restoration - Target Ratio: {wc_target_ratio:.2f}")
-            print(f"DEBUG: Current Liabilities: ${current_liabilities:,.2f}, Cash: ${cash_balance:,.2f}")
-            print(f"DEBUG: Target Cash: ${target_cash:,.2f}, WC Deficit: ${wc_deficit:,.2f}")
+            print(f"DEBUG: Current Liabilities: ${current_liabilities:,.2f}, Current Assets: ${current_assets:,.2f}")
+            print(f"DEBUG: Target Current Assets: ${target_current_assets:,.2f}, WC Deficit: ${wc_deficit:,.2f}")
             
             # Use multi-month average if available (avoids single-month anomalies like 3x debt service)
             # Otherwise fall back to projected_operational_fcf
             if multi_month_analysis and multi_month_analysis.get('average_fcf') is not None:
                 monthly_deficit = abs(multi_month_analysis['average_fcf']) if multi_month_analysis['average_fcf'] < 0 else 0
-                monthly_operating_cost = abs(multi_month_analysis['average_fcf']) if multi_month_analysis['average_fcf'] < 0 else 50000
                 print(f"DEBUG: Using multi-month average FCF: {multi_month_analysis['average_fcf']:,.2f} (analyzed {multi_month_analysis.get('months_analyzed', 0)} months)")
-                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}, monthly_operating_cost={monthly_operating_cost:,.2f}")
+                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}")
             else:
                 monthly_deficit = abs(projected_operational_fcf) if projected_operational_fcf < 0 else 0
-                monthly_operating_cost = abs(projected_operational_fcf) if projected_operational_fcf < 0 else (current_fcf if current_fcf > 0 else 50000)
                 print(f"DEBUG: No multi-month data, using single month projected_operational_fcf: {projected_operational_fcf:,.2f}")
-                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}, monthly_operating_cost={monthly_operating_cost:,.2f}")
+                print(f"DEBUG: monthly_deficit={monthly_deficit:,.2f}")
+            
+            # Calculate monthly operating cost for reserve buffer (debt service + expenses)
+            # This is separate from the deficit and represents true operating costs
+            monthly_operating_cost = monthly_debt_service + monthly_expenses
+            # Fallback if no data available
+            if monthly_operating_cost == 0:
+                monthly_operating_cost = max(50000, abs(current_liabilities / 12) if current_liabilities > 0 else 50000)
+            print(f"DEBUG: monthly_operating_cost (debt service + expenses) = ${monthly_operating_cost:,.2f}")
             
             # Use user's risk tolerance (reserve_months) directly for forward deficit projection
             # The accountant selects risk level based on their knowledge of property performance,
@@ -423,8 +465,13 @@ class RecommendationEngine:
                 months_forward = 0
                 forward_reason = "No projected deficit, but past working capital crisis requires restoration"
             
-            # Operating reserve buffer: use user-selected reserve_months requirement
-            operating_reserve_buffer = monthly_operating_cost * self.decision_thresholds['cash_reserve_months']
+            # Operating reserve buffer: use HALF the user-selected reserve_months requirement
+            # This balances capital efficiency with prudent reserves
+            # Full months used for deficit coverage, half for buffer cushion
+            reserve_buffer_months = self.decision_thresholds['cash_reserve_months'] / 2
+            operating_reserve_buffer = monthly_operating_cost * reserve_buffer_months
+            
+            print(f"DEBUG: Operating Reserve Buffer = ${monthly_operating_cost:,.2f} × {reserve_buffer_months:.1f} months = ${operating_reserve_buffer:,.2f}")
             
             # Need to cover: forward deficits + restore working capital + operating reserves
             contribution_breakdown = {
@@ -434,6 +481,7 @@ class RecommendationEngine:
                 'working_capital_restoration': wc_deficit,
                 'operating_reserve_buffer': operating_reserve_buffer,
                 'reserve_months': self.decision_thresholds['cash_reserve_months'],
+                'reserve_buffer_months': reserve_buffer_months,  # Show the half value used for buffer
                 'forward_reason': forward_reason,
                 'total': projected_multi_month_deficit + wc_deficit + operating_reserve_buffer
             }
@@ -569,7 +617,7 @@ class RecommendationEngine:
                                    noi_ytd_variance_pct: float, noi_month_variance_pct: float,
                                    expenses_ytd_variance_pct: float, seasonal_factor: Dict,
                                    enrollment_trend: str, working_capital: float = 0,
-                                   current_liabilities: float = 0, 
+                                   current_liabilities: float = 0, current_assets: float = 0,
                                    contribution_breakdown: Dict = None) -> List[str]:
         """Generate 5-7 executive summary bullet points supporting the decision"""
         
@@ -577,8 +625,9 @@ class RecommendationEngine:
         
         # PRIORITY BULLET: Working capital crisis warning
         if working_capital < -50000:
-            current_ratio = (cash_balance + 0) / max(current_liabilities, 1)  # Simplified: cash only as current assets
-            bullets.append(f"⚠️ **WORKING CAPITAL CRISIS**: Current liabilities (${current_liabilities:,.0f}) exceed current assets by ${abs(working_capital):,.0f}. Current ratio of {current_ratio:.2f}:1 indicates significant past-due obligations or structural cash flow problems. **FULL LIABILITY BREAKDOWN ANALYSIS REQUIRED BEFORE ANY CAPITAL DECISION**")
+            # Use actual current assets (cash + accounts receivable) for accurate current ratio
+            current_ratio = current_assets / max(current_liabilities, 1)
+            bullets.append(f"⚠️ **WORKING CAPITAL CRISIS**: Current liabilities (${current_liabilities:,.0f}) exceed current assets (${current_assets:,.0f}) by ${abs(working_capital):,.0f}. Current ratio of {current_ratio:.2f}:1 indicates significant past-due obligations or structural cash flow problems. **FULL LIABILITY BREAKDOWN ANALYSIS REQUIRED BEFORE ANY CAPITAL DECISION**")
         
         # Bullet 1: The decision
         if decision == 'CONTRIBUTE':
@@ -589,7 +638,7 @@ class RecommendationEngine:
                 forward_deficit = contribution_breakdown.get('forward_projected_deficit', 0)
                 wc_restore = contribution_breakdown.get('working_capital_restoration', 0)
                 reserve_buffer = contribution_breakdown.get('operating_reserve_buffer', 0)
-                reserve_months = contribution_breakdown.get('reserve_months', 6)
+                reserve_buffer_months = contribution_breakdown.get('reserve_buffer_months', 3)  # Half of reserve_months
                 forward_reason = contribution_breakdown.get('forward_reason', '')
                 
                 # Build detailed breakdown
@@ -603,7 +652,7 @@ class RecommendationEngine:
                     breakdown_parts.append(f"Working Capital Restoration: ${wc_restore:,.0f}")
                 
                 if reserve_buffer > 0:
-                    breakdown_parts.append(f"Operating Reserve Buffer ({reserve_months}mo): ${reserve_buffer:,.0f}")
+                    breakdown_parts.append(f"Operating Reserve Buffer ({reserve_buffer_months:.0f}mo): ${reserve_buffer:,.0f}")
                 
                 breakdown_text = " + ".join(breakdown_parts) + f" ~ **${amount:,.0f}**"
                 
@@ -729,7 +778,6 @@ Risk Selection: {risk_label}
   - Working Capital Target: {wc_target_ratio}:1 ratio
 
 {'='*78}
-
 CASH FORECAST ANALYSIS
 {'='*78}
 
@@ -887,11 +935,13 @@ BALANCE SHEET ANALYSIS
 Liquidity Position ({reporting_month}):
   Cash and Cash Equivalents: ${data.get('cash_balance', 0):,.2f}
   Accounts Receivable:       ${data.get('accounts_receivable', 0):,.2f}
-  Total Current Assets:      ${data.get('cash_balance', 0) + data.get('accounts_receivable', 0):,.2f}
+  Prepaid Expenses:          ${data.get('prepaid_expenses', 0):,.2f}
+  Other Current Assets:      ${data.get('other_current_assets', 0):,.2f}
+  Total Current Assets:      ${data.get('cash_balance', 0) + data.get('accounts_receivable', 0) + data.get('prepaid_expenses', 0) + data.get('other_current_assets', 0):,.2f}
   
   Current Liabilities:       ${data.get('current_liabilities', 0):,.2f}
-  Working Capital:           ${data.get('cash_balance', 0) - data.get('current_liabilities', 0):,.2f}
-  Current Ratio:             {(data.get('cash_balance', 0) + data.get('accounts_receivable', 0)) / max(data.get('current_liabilities', 1), 1):.2f}:1
+  Working Capital:           ${(data.get('cash_balance', 0) + data.get('accounts_receivable', 0) + data.get('prepaid_expenses', 0) + data.get('other_current_assets', 0)) - data.get('current_liabilities', 0):,.2f}
+  Current Ratio:             {(data.get('cash_balance', 0) + data.get('accounts_receivable', 0) + data.get('prepaid_expenses', 0) + data.get('other_current_assets', 0)) / max(data.get('current_liabilities', 1), 1):.2f}:1
 
 Debt Position:
   Total Notes Payable:       ${data.get('total_debt', 0):,.2f}

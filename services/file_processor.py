@@ -278,6 +278,7 @@ class FileProcessor:
             logger.debug(f"FCF row: {fcf_row}")
             logger.debug(f"Actual Distributions row: {actual_distributions_row}")
             logger.debug(f"Forecasted Distributions row: {forecasted_distributions_row}")
+            print(f"DEBUG: Forecasted Distributions row: {forecasted_distributions_row}")
             
             # Find current month (most recent "Actual" = LAST actual column) and next 6 months (Budget months)
             current_month_idx = None
@@ -289,12 +290,13 @@ class FileProcessor:
                         current_month_idx = i  # Keep updating to get the LAST actual month
                     elif 'budget' in status.lower() and current_month_idx is not None:
                         budget_month_indices.append(i)
-                        if len(budget_month_indices) >= 6:  # Collect up to 6 budget months
+                        if len(budget_month_indices) >= 7:  # Collect up to 7 budget months to ensure we get 6 full months
                             break
             
             next_month_idx = budget_month_indices[0] if budget_month_indices else None
             logger.debug(f"Current month index: {current_month_idx}, Next month index: {next_month_idx}")
-            logger.debug(f"Budget month indices (next 6 months): {budget_month_indices}")
+            logger.debug(f"Budget month indices (next 7 months): {budget_month_indices}")
+            print(f"DEBUG: Found {len(budget_month_indices)} budget month columns")
             
             # Extract data for current and projected months
             # Convert datetime objects to strings in "Month YYYY" format
@@ -366,7 +368,11 @@ class FileProcessor:
             
             # Extract budget month projection data
             # Only include months with valid data (both FCF and occupancy must be present)
+            # IMPORTANT: Contributions/distributions in early months affect all subsequent ending balances
+            # We need to track cumulative effect and remove it from all months
             projected_months = []
+            cumulative_forecasted_dist = 0  # Track cumulative contributions/distributions
+            
             for idx in budget_month_indices:
                 month_date = month_row[idx]
                 month_name = month_date.strftime('%B %Y') if isinstance(month_date, (pd.Timestamp, datetime)) else str(month_date)
@@ -390,8 +396,14 @@ class FileProcessor:
                     logger.debug(f"Skipping {month_name} - zero values suggest no budget data")
                     continue
                 
-                # Calculate operational FCF (before planned distribution)
-                month_operational_fcf = month_fcf - month_forecasted_dist
+                # Accumulate the forecasted distribution for this month
+                cumulative_forecasted_dist += month_forecasted_dist
+                
+                # Calculate operational FCF (before ALL planned contributions/distributions)
+                # The ending FCF includes the cumulative effect of all prior contributions
+                month_operational_fcf = month_fcf - cumulative_forecasted_dist
+                
+                print(f"DEBUG:   {month_name}: FCF={month_fcf:,.2f}, This Month Dist={month_forecasted_dist:,.2f}, Cumulative Dist={cumulative_forecasted_dist:,.2f}, Operational FCF={month_operational_fcf:,.2f}")
                 
                 projected_months.append({
                     'month': month_name,
@@ -614,6 +626,8 @@ class FileProcessor:
             patterns = {
                 'Total Cash and Cash Equivalents': r'Total Cash and Cash Equivalents\s+([\d,.-]+)\s+([\d,.-]+)',
                 'Total Accounts Receivable': r'Total Accounts Receivable\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Prepaid Expenses': r'Prepaid Expenses\s+([\d,.-]+)\s+([\d,.-]+)',
+                'Other Current Assets': r'Other Current Assets\s+([\d,.-]+)\s+([\d,.-]+)',
                 'Total Current Liabilities': r'Total Current Liabilities\s+([\d,.-]+)\s+([\d,.-]+)',
                 'Total Notes Payable': r'Total Notes Payable\s+([\d,.-]+)\s+([\d,.-]+)',
                 'Accrued Interest': r'Accrued Interest\s+([\d,.-]+)\s+([\d,.-]+)',
@@ -632,6 +646,10 @@ class FileProcessor:
                         result['cash_prior_month'] = prior_val
                     elif label == 'Total Accounts Receivable':
                         result['accounts_receivable'] = current_val
+                    elif label == 'Prepaid Expenses':
+                        result['prepaid_expenses'] = current_val
+                    elif label == 'Other Current Assets':
+                        result['other_current_assets'] = current_val
                     elif label == 'Total Current Liabilities':
                         result['current_liabilities'] = current_val
                     elif label == 'Total Notes Payable':

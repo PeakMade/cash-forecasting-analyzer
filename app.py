@@ -535,7 +535,7 @@ def analyze_files():
         risk_to_months = {
             'low': int(os.getenv('RISK_LOW_MONTHS', '2')),
             'medium': int(os.getenv('RISK_MEDIUM_MONTHS', '6')),
-            'high': int(os.getenv('RISK_HIGH_MONTHS', '10'))
+            'high': int(os.getenv('RISK_HIGH_MONTHS', '6'))
         }
         reserve_months = risk_to_months.get(client_risk.lower())
         if reserve_months is None:
