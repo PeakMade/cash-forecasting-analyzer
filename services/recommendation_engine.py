@@ -155,7 +155,8 @@ class RecommendationEngine:
             working_capital=working_capital,
             current_liabilities=current_liabilities,
             current_assets=current_assets,
-            contribution_breakdown=contribution_breakdown
+            contribution_breakdown=contribution_breakdown,
+            multi_month_analysis=multi_month_analysis
         )
         
         # Add occupancy adjustment note to summary if significant
@@ -272,6 +273,11 @@ class RecommendationEngine:
         fcf_values = [m.get('operational_fcf', m['fcf']) for m in projected_months]
         print(f"DEBUG: FCF ending balances: {[f'${v:,.2f}' for v in fcf_values]}")
         
+        # Track voluntary reserve allocations
+        total_reserves = sum(m.get('reserve_allocations', 0) for m in projected_months)
+        if total_reserves > 0:
+            print(f"DEBUG: Total voluntary reserve allocations: ${total_reserves:,.2f}")
+        
         # ALWAYS calculate month-over-month deltas (incremental changes)
         # The Excel shows ending balances, we need the change from month to month
         # With N months, we get (N-1) deltas (the changes between consecutive months)
@@ -333,7 +339,8 @@ class RecommendationEngine:
             'negative_months': negative_months,
             'trend': trend,
             'all_positive': negative_months == 0,
-            'months_analyzed': len(projected_months)
+            'months_analyzed': len(projected_months),
+            'total_reserves': total_reserves  # Voluntary reserve allocations
         }
     
     def _calculate_reserves_after_distribution(self, balance_data: Dict, distribution_amount: float) -> float:
@@ -618,7 +625,8 @@ class RecommendationEngine:
                                    expenses_ytd_variance_pct: float, seasonal_factor: Dict,
                                    enrollment_trend: str, working_capital: float = 0,
                                    current_liabilities: float = 0, current_assets: float = 0,
-                                   contribution_breakdown: Dict = None) -> List[str]:
+                                   contribution_breakdown: Dict = None,
+                                   multi_month_analysis: Dict = None) -> List[str]:
         """Generate 5-7 executive summary bullet points supporting the decision"""
         
         bullets = []
@@ -691,6 +699,20 @@ class RecommendationEngine:
         # Bullet 3: Liquidity position
         reserve_status = "strong" if months_of_reserves > 10 else "adequate" if months_of_reserves > 6 else "tight"
         bullets.append(f"Cash reserves of ${cash_balance:,.0f} provide {months_of_reserves:.1f} months of coverage - {reserve_status} liquidity position")
+        
+        # Bullet 3a: Voluntary reserve allocations (if significant and part of multi-month analysis)
+        # This helps explain negative FCF when property is operationally healthy
+        if multi_month_analysis:
+            total_reserves = multi_month_analysis.get('total_reserves', 0)
+            months_analyzed = multi_month_analysis.get('months_analyzed', 0)
+            avg_fcf = multi_month_analysis.get('average_fcf', 0)
+            
+            # Show reserve note if:
+            # 1. Significant reserves are being set aside (>$50k total), AND
+            # 2. Property is operationally healthy (avg FCF close to zero or positive, OR decision is DO_NOTHING)
+            if total_reserves > 50000 and (avg_fcf >= -20000 or decision == 'DO_NOTHING'):
+                avg_monthly_reserves = total_reserves / months_analyzed if months_analyzed > 0 else total_reserves
+                bullets.append(f"Accountant's budget includes ${total_reserves:,.0f} in voluntary reserve allocations across projected months (avg ${avg_monthly_reserves:,.0f}/month), impacting reported FCF but strengthening balance sheet sub-accounts")
         
         # Bullet 4: Operating performance (NOI)
         # Variance % = (actual - budget) / budget * 100
@@ -858,6 +880,9 @@ Analyzing next {num_months} month{'s' if num_months > 1 else ''} of projections:
                 else:
                     projection_section += f"  {i}. {month['month']:<15} FCF: ${month['fcf']:>12,.2f}  Occ: {month['occupancy']:>5.1f}%  {status_icon}\n"
             
+            # Calculate total reserve allocations across all projected months
+            total_reserves = sum(m.get('reserve_allocations', 0) for m in projected_months)
+            
             projection_section += f"""
 Summary Statistics (Operational FCF):
   Total Projected FCF ({num_months} month{'s' if num_months > 1 else ''}): ${total_operational_fcf:,.2f}
@@ -867,6 +892,10 @@ Summary Statistics (Operational FCF):
   Positive Months:                {len([m for m in projected_months if m.get('operational_fcf', m['fcf']) > 0])} of {num_months}
   Negative Months:                {len(negative_operational_months)}
 """
+            if total_reserves > 0:
+                avg_reserves = total_reserves / num_months
+                projection_section += f"  Voluntary Reserve Allocations: ${total_reserves:,.2f} total (avg ${avg_reserves:,.2f}/month)\n"
+            
             if negative_operational_months:
                 projection_section += f"  ⚠️  Warning: {len(negative_operational_months)} month(s) show negative cash flow\n"
             
@@ -1262,8 +1291,26 @@ Monitor monthly performance and reassess distribution potential once reserves re
         current_fcf = data.get('current_fcf', 0)
         projected_distributions = data.get('projected_distributions', 0)
         
+        # Check for voluntary reserve allocations
+        multi_month_analysis = data.get('multi_month_analysis', {})
+        total_reserves = multi_month_analysis.get('total_reserves', 0) if multi_month_analysis else 0
+        months_analyzed = multi_month_analysis.get('months_analyzed', 0) if multi_month_analysis else 0
+        
         if projected_operational_fcf < 0:
-            return f"The projected month shows an operational cash deficit of ${abs(projected_operational_fcf):,.2f} before any planned distributions. This represents a significant variance from the current month's positive cash flow of ${current_fcf:,.2f}. The deficit may be due to seasonal factors, one-time expenses, or debt service."
+            base_text = f"The projected month shows an operational cash deficit of ${abs(projected_operational_fcf):,.2f} before any planned distributions."
+            
+            # Check if deficit is primarily due to voluntary reserve funding
+            projected_months = data.get('projected_months', [])
+            first_month_reserves = projected_months[0].get('reserve_allocations', 0) if projected_months else 0
+            
+            if first_month_reserves > 0 and abs(projected_operational_fcf) <= first_month_reserves * 1.5:
+                # Deficit is substantially explained by voluntary reserve allocations
+                base_text += f" However, this month includes ${first_month_reserves:,.2f} in voluntary reserve allocations (such as insurance, tax reserves, prepaid expenses, etc.) which are balance sheet transfers that reduce FCF but strengthen reserves. The underlying operational performance remains stable."
+            else:
+                # Standard deficit interpretation
+                base_text += f" This represents a significant variance from the current month's positive cash flow of ${current_fcf:,.2f}. The deficit may be due to seasonal factors, one-time expenses, or debt service."
+            
+            return base_text
         else:
             base_text = f"The projected month shows positive operational free cash flow of ${projected_operational_fcf:,.2f}, consistent with the current month's performance of ${current_fcf:,.2f}. This indicates stable cash generation capability."
             

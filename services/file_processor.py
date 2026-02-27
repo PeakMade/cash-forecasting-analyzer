@@ -242,6 +242,7 @@ class FileProcessor:
             # Find FCF and distribution rows using detected label column
             fcf_row_idx = self._find_row_by_label(df, ['Free Cash Flow', 'Free Cash'], column=label_col)
             actual_dist_row_idx = self._find_row_by_label(df, ['ACTUAL (Distributions)', 'ACTUAL  (Distributions)'], column=label_col)
+            ending_cash_balance_row_idx = self._find_row_by_label(df, ['Ending Cash Balance Available', 'Ending Cash Balance', 'Cash Balance Available'], column=label_col)
             forecasted_dist_row_idx = self._find_row_by_label(df, [
                 'FORECASTED  (Distributions)/Contributions',
                 'FORECASTED (Distributions)/Contributions', 
@@ -262,7 +263,7 @@ class FileProcessor:
                         if pd.notna(label) and str(label).strip():
                             logger.warning(f"  Row {idx}: '{label}'")
             
-            logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
+            logger.debug(f"Row indices - Status:{status_row_idx}, Month:{month_row_idx}, BudgetedOcc:{budgeted_occ_idx}, ActualOcc:{actual_occ_idx}, FCF:{fcf_row_idx}, ActualDist:{actual_dist_row_idx}, EndingCash:{ending_cash_balance_row_idx}, ForecastedDist:{forecasted_dist_row_idx}")
             
             # Extract rows
             status_row = df.iloc[status_row_idx, year_2025_cols].tolist() if status_row_idx is not None else []
@@ -345,6 +346,24 @@ class FileProcessor:
                                                                                                 forecasted_distributions_row and 
                                                                                                 projected_month_col_idx < len(forecasted_distributions_row)) else 0
             
+            # Parse RESERVES section if it exists (between Ending Cash Balance and Forecasted Distributions)
+            # These are voluntary reserve allocations by the accountant that impact FCF
+            projected_month_reserves = 0
+            if ending_cash_balance_row_idx is not None and forecasted_dist_row_idx is not None:
+                reserves_start_row = ending_cash_balance_row_idx + 1
+                reserves_end_row = forecasted_dist_row_idx
+                
+                # Sum all reserve allocations in projected month column
+                for row_idx in range(reserves_start_row, reserves_end_row):
+                    reserve_value = df.iloc[row_idx, year_2025_cols[projected_month_col_idx]] if row_idx < len(df) else None
+                    if pd.notna(reserve_value) and isinstance(reserve_value, (int, float)):
+                        # Negative values are reserve allocations (cash OUT)
+                        if reserve_value < 0:
+                            projected_month_reserves += abs(reserve_value)
+                
+                if projected_month_reserves > 0:
+                    logger.info(f"Detected ${projected_month_reserves:,.2f} in voluntary reserve allocations for projected month")
+            
             logger.debug(f"Raw values - FCF: {current_fcf}/{projected_fcf}, Occ: {current_occupancy}/{projected_occupancy}, Dist: {current_distributions}/{projected_distributions}")
             
             # Convert to float, handle potential non-numeric values
@@ -372,6 +391,7 @@ class FileProcessor:
             # We need to track cumulative effect and remove it from all months
             projected_months = []
             cumulative_forecasted_dist = 0  # Track cumulative contributions/distributions
+            total_reserves_across_months = 0  # Track total voluntary reserve allocations
             
             for idx in budget_month_indices:
                 month_date = month_row[idx]
@@ -403,19 +423,37 @@ class FileProcessor:
                 # The ending FCF includes the cumulative effect of all prior contributions
                 month_operational_fcf = month_fcf - cumulative_forecasted_dist
                 
-                print(f"DEBUG:   {month_name}: FCF={month_fcf:,.2f}, This Month Dist={month_forecasted_dist:,.2f}, Cumulative Dist={cumulative_forecasted_dist:,.2f}, Operational FCF={month_operational_fcf:,.2f}")
+                # Parse reserve allocations for this budget month
+                month_reserves = 0
+                if ending_cash_balance_row_idx is not None and forecasted_dist_row_idx is not None:
+                    reserves_start_row = ending_cash_balance_row_idx + 1
+                    reserves_end_row = forecasted_dist_row_idx
+                    
+                    for row_idx in range(reserves_start_row, reserves_end_row):
+                        reserve_value = df.iloc[row_idx, year_2025_cols[idx]] if row_idx < len(df) else None
+                        if pd.notna(reserve_value) and isinstance(reserve_value, (int, float)):
+                            if reserve_value < 0:
+                                month_reserves += abs(reserve_value)
+                    
+                    total_reserves_across_months += month_reserves
+                
+                print(f"DEBUG:   {month_name}: FCF={month_fcf:,.2f}, This Month Dist={month_forecasted_dist:,.2f}, Cumulative Dist={cumulative_forecasted_dist:,.2f}, Reserves={month_reserves:,.2f}, Operational FCF={month_operational_fcf:,.2f}")
                 
                 projected_months.append({
                     'month': month_name,
                     'fcf': month_fcf,
                     'operational_fcf': month_operational_fcf,  # FCF before planned distribution
                     'occupancy': month_occupancy,
-                    'forecasted_distribution': month_forecasted_dist
+                    'forecasted_distribution': month_forecasted_dist,
+                    'reserve_allocations': month_reserves  # Voluntary reserve funding
                 })
             
             logger.info(f"Extracted {len(projected_months)} valid month(s) of budget projections")
             for i, proj in enumerate(projected_months, 1):  # Log all months
-                logger.debug(f"  Month {i}: {proj['month']} - Operational FCF: ${proj['operational_fcf']:,.2f}, After Dist: ${proj['fcf']:,.2f}, Occ: {proj['occupancy']:.1f}%")
+                logger.debug(f"  Month {i}: {proj['month']} - Operational FCF: ${proj['operational_fcf']:,.2f}, After Dist: ${proj['fcf']:,.2f}, Reserves: ${proj.get('reserve_allocations', 0):,.2f}, Occ: {proj['occupancy']:.1f}%")
+            
+            if total_reserves_across_months > 0:
+                logger.info(f"Total voluntary reserve allocations across all projected months: ${total_reserves_across_months:,.2f}")
             
             result = {
                 'status': 'success',
