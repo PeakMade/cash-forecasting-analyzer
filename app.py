@@ -21,6 +21,41 @@ print(f"ENV DEBUG: OPENAI_MODEL={os.environ.get('OPENAI_MODEL')}")
 print(f"ENV DEBUG: PROPERTY_DATA_SOURCE={os.environ.get('PROPERTY_DATA_SOURCE')}")
 print(f"ENV DEBUG: SECRET_KEY exists={bool(os.environ.get('SECRET_KEY'))}")
 
+# Version checks - CRITICAL for economic analysis with web search
+print("\n" + "="*80)
+print("FLASK APP INITIALIZATION - VERSION CHECKS")
+print("="*80)
+try:
+    import openai
+    print(f"✓ OpenAI Library Version: {openai.__version__}")
+    if openai.__version__ >= "2.2.0":
+        print("  ✓ Web search capability available (Responses API)")
+    else:
+        print("  ⚠️  WARNING: OpenAI library too old - web search will NOT work!")
+        print("  ⚠️  Run: pip install --upgrade openai==2.2.0")
+except Exception as e:
+    print(f"✗ Error checking OpenAI version: {e}")
+
+try:
+    from services.economic_analysis import EconomicAnalyzer
+    test_analyzer = EconomicAnalyzer()
+    print(f"✓ IPEDS Client Enabled: {test_analyzer.ipeds.enabled}")
+    print(f"✓ OpenAI Model: {test_analyzer.model}")
+    if hasattr(test_analyzer.client, 'responses'):
+        print(f"✓ Responses API Available: YES (web search enabled)")
+    else:
+        print(f"⚠️  Responses API Available: NO (upgrade openai library)")
+except Exception as e:
+    print(f"✗ Error checking economic analyzer: {e}")
+
+college_scorecard_key = os.environ.get('COLLEGE_SCORECARD_API_KEY')
+if college_scorecard_key:
+    print(f"✓ College Scorecard API Key: Set (...{college_scorecard_key[-10:]})")
+else:
+    print("⚠️  College Scorecard API Key: Not set (IPEDS data disabled)")
+print("="*80 + "\n")
+
+
 from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
 from services.summary_generator import SummaryGenerator
@@ -320,6 +355,179 @@ def session_start():
     except Exception as e:
         print(f"=== Session start error: {str(e)} ===")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/health')
+def health_check():
+    """
+    Health check endpoint - shows system configuration and versions
+    Access at: http://localhost:5000/health
+    """
+    import openai
+    from services.economic_analysis import EconomicAnalyzer
+    
+    # Gather version and configuration info
+    health_info = {
+        'status': 'running',
+        'timestamp': datetime.now().isoformat(),
+        'openai_version': openai.__version__,
+        'openai_version_ok': openai.__version__ >= "2.2.0",
+        'web_search_capable': hasattr(openai.OpenAI(api_key='test'), 'responses'),
+        'environment': {
+            'openai_model': os.environ.get('OPENAI_MODEL', 'not set'),
+            'property_data_source': os.environ.get('PROPERTY_DATA_SOURCE', 'not set'),
+            'college_scorecard_api_key': 'set' if os.environ.get('COLLEGE_SCORECARD_API_KEY') else 'NOT SET',
+            'bls_api_key': 'set' if os.environ.get('BLS_API_KEY') else 'NOT SET',
+        }
+    }
+    
+    # Test economic analyzer
+    try:
+        test_analyzer = EconomicAnalyzer()
+        health_info['economic_analyzer'] = {
+            'initialized': True,
+            'model': test_analyzer.model,
+            'ipeds_enabled': test_analyzer.ipeds.enabled,
+            'bls_enabled': test_analyzer.bls.enabled,
+            'responses_api_available': hasattr(test_analyzer.client, 'responses')
+        }
+    except Exception as e:
+        health_info['economic_analyzer'] = {
+            'initialized': False,
+            'error': str(e)
+        }
+    
+    # Generate HTML response
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Cash Forecast Analyzer - Health Check</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+            .container {{ background: white; padding: 30px; border-radius: 8px; max-width: 800px; margin: 0 auto; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            h1 {{ color: #2c5282; border-bottom: 3px solid #4299e1; padding-bottom: 10px; }}
+            h2 {{ color: #2d3748; margin-top: 30px; }}
+            .status-ok {{ color: #38a169; font-weight: bold; }}
+            .status-warning {{ color: #d69e2e; font-weight: bold; }}
+            .status-error {{ color: #e53e3e; font-weight: bold; }}
+            table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+            th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #e2e8f0; }}
+            th {{ background: #edf2f7; font-weight: 600; color: #2d3748; }}
+            .badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; }}
+            .badge-success {{ background: #c6f6d5; color: #22543d; }}
+            .badge-warning {{ background: #feebc8; color: #744210; }}
+            .badge-error {{ background: #fed7d7; color: #742a2a; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🏥 Cash Forecast Analyzer - Health Check</h1>
+            <p><strong>Status:</strong> <span class="status-ok">✓ RUNNING</span></p>
+            <p><strong>Timestamp:</strong> {health_info['timestamp']}</p>
+            
+            <h2>📦 OpenAI Library</h2>
+            <table>
+                <tr>
+                    <th>Property</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                </tr>
+                <tr>
+                    <td>Version</td>
+                    <td>{health_info['openai_version']}</td>
+                    <td>{'<span class="badge badge-success">✓ OK (≥2.2.0)</span>' if health_info['openai_version_ok'] else '<span class="badge badge-error">✗ TOO OLD</span>'}</td>
+                </tr>
+                <tr>
+                    <td>Responses API (Web Search)</td>
+                    <td>{'Available' if health_info['web_search_capable'] else 'Not Available'}</td>
+                    <td>{'<span class="badge badge-success">✓ ENABLED</span>' if health_info['web_search_capable'] else '<span class="badge badge-error">✗ DISABLED</span>'}</td>
+                </tr>
+            </table>
+            
+            <h2>🎓 Economic Analysis Configuration</h2>
+            <table>
+                <tr>
+                    <th>Property</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                </tr>
+                <tr>
+                    <td>Economic Analyzer</td>
+                    <td>{'Initialized' if health_info['economic_analyzer']['initialized'] else 'Error'}</td>
+                    <td>{'<span class="badge badge-success">✓ OK</span>' if health_info['economic_analyzer']['initialized'] else '<span class="badge badge-error">✗ ERROR</span>'}</td>
+                </tr>
+                <tr>
+                    <td>OpenAI Model</td>
+                    <td>{health_info['economic_analyzer'].get('model', 'N/A')}</td>
+                    <td><span class="badge badge-success">✓ OK</span></td>
+                </tr>
+                <tr>
+                    <td>IPEDS Data (Historical Enrollment)</td>
+                    <td>{'Enabled' if health_info['economic_analyzer'].get('ipeds_enabled') else 'Disabled'}</td>
+                    <td>{'<span class="badge badge-success">✓ ENABLED</span>' if health_info['economic_analyzer'].get('ipeds_enabled') else '<span class="badge badge-warning">⚠ DISABLED</span>'}</td>
+                </tr>
+                <tr>
+                    <td>BLS Data (Official Unemployment)</td>
+                    <td>{'Enabled' if health_info['economic_analyzer'].get('bls_enabled') else 'Disabled'}</td>
+                    <td>{'<span class="badge badge-success">✓ ENABLED</span>' if health_info['economic_analyzer'].get('bls_enabled') else '<span class="badge badge-warning">⚠ DISABLED</span>'}</td>
+                </tr>
+                <tr>
+                    <td>Web Search (Current Data)</td>
+                    <td>{'Available' if health_info['economic_analyzer'].get('responses_api_available') else 'Not Available'}</td>
+                    <td>{'<span class="badge badge-success">✓ ENABLED</span>' if health_info['economic_analyzer'].get('responses_api_available') else '<span class="badge badge-error">✗ DISABLED</span>'}</td>
+                </tr>
+            </table>
+            
+            <h2>🔧 Environment Variables</h2>
+            <table>
+                <tr>
+                    <th>Variable</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                </tr>
+                <tr>
+                    <td>OPENAI_MODEL</td>
+                    <td>{health_info['environment']['openai_model']}</td>
+                    <td><span class="badge badge-success">✓ SET</span></td>
+                </tr>
+                <tr>
+                    <td>PROPERTY_DATA_SOURCE</td>
+                    <td>{health_info['environment']['property_data_source']}</td>
+                    <td><span class="badge badge-success">✓ SET</span></td>
+                </tr>
+                <tr>
+                    <td>COLLEGE_SCORECARD_API_KEY</td>
+                    <td>{health_info['environment']['college_scorecard_api_key']}</td>
+                    <td>{'<span class="badge badge-success">✓ SET</span>' if health_info['environment']['college_scorecard_api_key'] == 'set' else '<span class="badge badge-warning">⚠ NOT SET</span>'}</td>
+                </tr>
+                <tr>
+                    <td>BLS_API_KEY</td>
+                    <td>{health_info['environment']['bls_api_key']}</td>
+                    <td>{'<span class="badge badge-success">✓ SET</span>' if health_info['environment']['bls_api_key'] == 'set' else '<span class="badge badge-warning">⚠ NOT SET</span>'}</td>
+                </tr>
+            </table>
+            
+            <h2>✅ Expected Behavior</h2>
+            <ul>
+                <li><strong>OpenAI Version ≥ 2.2.0:</strong> Required for web search capability</li>
+                <li><strong>Responses API Available:</strong> Enables real-time web search for current enrollment data</li>
+                <li><strong>IPEDS Enabled:</strong> Provides official historical enrollment baseline (2018-2022)</li>
+                <li><strong>BLS Enabled:</strong> Provides official unemployment rates from Bureau of Labor Statistics</li>
+                <li><strong>Web Search Enabled:</strong> Provides current enrollment estimates (2025-2026) and employment context</li>
+            </ul>
+            
+            <p style="margin-top: 30px; padding: 20px; background: #edf2f7; border-left: 4px solid #4299e1; border-radius: 4px;">
+                <strong>💡 Tip:</strong> If web search is disabled, run: <code>pip install --upgrade openai==2.2.0</code> and restart Flask.
+            </p>
+            
+            <p style="text-align: center; margin-top: 30px; color: #718096;">
+                <a href="/" style="color: #4299e1; text-decoration: none;">← Back to Main App</a>
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
 @app.route('/')
 @login_required
@@ -739,11 +947,6 @@ def download_docx():
     except Exception as e:
         app.logger.error(f"Error downloading Word document: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint for Azure"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 @app.route('/test-db')
 @login_required

@@ -1,15 +1,23 @@
 """
 Economic and Geographic Analysis Service for Student Housing
-Uses OpenAI API to gather contextual information about university, local economy, and market conditions
+Uses OpenAI Responses API with web search for current enrollment data
+Integrates IPEDS for official historical enrollment baseline (2018-2022)
+Combines official government data with real-time web search for comprehensive analysis
 """
 import os
 from openai import OpenAI
 from datetime import datetime
 import json
+import logging
+from services.ipeds_client import IPEDSClient
+from services.bls_client import BLSClient
+
+logger = logging.getLogger(__name__)
+
 
 class EconomicAnalyzer:
     def __init__(self, api_key=None, model=None):
-        """Initialize the OpenAI client"""
+        """Initialize the OpenAI client and IPEDS client"""
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
         if not self.api_key:
             raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
@@ -17,6 +25,20 @@ class EconomicAnalyzer:
         self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4o')
         self.client = OpenAI(api_key=self.api_key)
         self.current_date = datetime.now().strftime("%B %Y")
+        
+        # Initialize IPEDS client for official enrollment data
+        self.ipeds = IPEDSClient()
+        if self.ipeds.enabled:
+            logger.info("IPEDS client enabled for official university enrollment data")
+        else:
+            logger.warning("IPEDS client disabled - analysis will rely on model training data")
+        
+        # Initialize BLS client for unemployment data
+        self.bls = BLSClient()
+        if self.bls.enabled:
+            logger.info("BLS client enabled for official unemployment data")
+        else:
+            logger.warning("BLS client disabled - unemployment data from web search only")
     
     def analyze_property_context(self, property_name, university, city, state, zip_code, current_month):
         """
@@ -34,6 +56,39 @@ class EconomicAnalyzer:
             dict: Analysis results with enrollment trends, economic outlook, seasonal factors, and recommendations
         """
         
+        # Get official enrollment data from IPEDS
+        enrollment_context = ""
+        enrollment_data = None
+        
+        if self.ipeds.enabled:
+            logger.info(f"Fetching IPEDS enrollment data for {university}")
+            enrollment_data = self.ipeds.search_university(university)
+            
+            if enrollment_data:
+                enrollment_context = self.ipeds.format_for_analysis(enrollment_data)
+                logger.info(f"Retrieved enrollment data: {enrollment_data['current_enrollment']:,} students, {enrollment_data['trend']['description']}")
+            else:
+                logger.warning(f"Could not find enrollment data for {university}")
+                enrollment_context = "\n=== UNIVERSITY ENROLLMENT DATA ===\nOfficial enrollment data not available for this institution.\n"
+        else:
+            logger.warning("IPEDS client not enabled - using model knowledge only")
+        
+        # Get official unemployment data from BLS
+        unemployment_context = ""
+        unemployment_data = None
+        
+        if self.bls.enabled:
+            logger.info(f"Fetching BLS unemployment data for {city}, {state}")
+            unemployment_data = self.bls.get_unemployment_rate(city, state)
+            
+            if unemployment_data:
+                unemployment_context = f"\n=== OFFICIAL UNEMPLOYMENT DATA (Bureau of Labor Statistics) ===\nUnemployment Rate: {self.bls.format_for_analysis(unemployment_data)}\n"
+                logger.info(f"Retrieved unemployment rate: {unemployment_data['unemployment_rate']}% for {unemployment_data['period']}")
+            else:
+                logger.warning(f"Could not find unemployment data for {city}, {state}")
+        else:
+            logger.info("BLS client not enabled - unemployment data from web search only")
+        
         prompt = f"""You are a real estate financial analyst specializing in student housing properties. 
 Analyze the following student housing property and provide a comprehensive economic and market context assessment.
 
@@ -44,11 +99,22 @@ Property Information:
 - Current Analysis Month: {current_month}
 - Today's Date: {self.current_date}
 
+{enrollment_context}
+{unemployment_context}
+
+IMPORTANT ENROLLMENT DATA INSTRUCTIONS:
+1. The enrollment data above is from the official U.S. Department of Education IPEDS database (historical data 2018-2022)
+2. Use these EXACT IPEDS figures when discussing historical enrollment trends
+3. ADDITIONALLY: Search the web for CURRENT {university} enrollment for 2025-2026 academic year
+4. Present both: historical IPEDS baseline + current web-sourced enrollment estimate
+5. Clearly distinguish between official historical data and current estimates
+
 Please provide a structured analysis covering:
 
 1. UNIVERSITY ENROLLMENT TRENDS
-   - Current enrollment figures for {university}
-   - Year-over-year enrollment trends (last 3 years)
+   - Historical: Use the IPEDS data provided above for 2018-2022 enrollment baseline
+   - Current: Search for and report current 2025-2026 enrollment (cite web sources)
+   - Compare historical trend vs. current enrollment
    - Enrollment projections for next academic year
    - Any notable enrollment initiatives or challenges
 
@@ -58,11 +124,35 @@ Please provide a structured analysis covering:
    - Expected occupancy patterns for next 3-6 months
    - Summer occupancy considerations
 
-3. LOCAL ECONOMIC INDICATORS
-   - {city} economic outlook and job market
-   - Student employment opportunities
-   - Cost of living trends
-   - Major economic developments or concerns
+3. LOCAL EMPLOYMENT & ECONOMIC CONDITIONS
+   CRITICAL: If official BLS unemployment data is provided above, USE THOSE EXACT FIGURES.
+   Otherwise, search the web for CURRENT {city}, {state} economic data:
+   
+   A. Employment Metrics (search for latest 2025-2026 data):
+      - Current unemployment rate for {city} metro area (USE BLS DATA IF PROVIDED ABOVE)
+      - Job growth trends (year-over-year change)
+      - Labor force participation rate
+      - Major employers in {city} (top 5-10)
+      - Industries driving local economy
+      
+   B. Student Employment Market:
+      - On-campus employment opportunities at {university}
+      - Part-time job availability for students
+      - Average student wages in {city}
+      - Co-op/internship programs and placement rates
+      - Gig economy presence (food delivery, rideshare, etc.)
+      
+   C. Economic Outlook:
+      - GDP growth or economic expansion indicators for {city} region
+      - Recent major business openings/closings
+      - Infrastructure projects or development plans
+      - Cost of living trends (rent, groceries, utilities)
+      - Housing affordability index for {city}
+      
+   D. Risk Factors:
+      - Economic headwinds or challenges facing {city}
+      - Industry layoffs or contractions
+      - Population migration trends (growing/declining)
 
 4. STUDENT HOUSING MARKET
    - Supply/demand dynamics in {city}
@@ -81,24 +171,72 @@ Please provide a structured analysis covering:
    - Reliability of budget assumptions given market conditions
    - Recommended adjustments or considerations for forecasting
 
-Please be specific, cite recent data where possible, and focus on actionable insights for cash flow forecasting and decision-making.
-Format your response as a structured analysis with clear sections and bullet points."""
+IMPORTANT INSTRUCTIONS:
+- Use web search to find CURRENT data (2025-2026) for enrollment, employment, and economic conditions
+- Cite specific data sources and dates when presenting statistics
+- For enrollment: Present both official IPEDS historical baseline AND current web-sourced estimates
+- For employment/economy: Focus on most recent available data (prioritize 2025-2026, accept 2024 data if newer not available)
+- Be specific with numbers (unemployment rates, enrollment figures, job growth percentages)
+- Focus on actionable insights for cash flow forecasting and decision-making
+- Format your response as a structured analysis with clear sections and bullet points"""
 
         try:
-            response = self.client.chat.completions.create(
+            # Use Responses API with web search to get current enrollment and economic data
+            response = self.client.responses.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert real estate financial analyst with deep knowledge of student housing markets, university trends, and local economic conditions. Provide data-driven, actionable insights."},
-                    {"role": "user", "content": prompt}
-                ],
+                instructions="""You are an expert real estate financial analyst specializing in student housing markets. 
+
+Your expertise includes:
+- University enrollment trends and projections
+- Local labor markets and employment conditions
+- Student housing supply/demand dynamics
+- Economic factors affecting student housing cash flows
+
+Data Sources:
+1. IPEDS data (when provided): Official historical enrollment baseline - cite these exact figures
+2. Web search: Use to find current 2025-2026 enrollment, employment rates, economic conditions, and market data
+3. Always cite specific sources and dates for statistics you present
+
+Deliverable: Provide data-driven, specific insights with concrete numbers and actionable recommendations for cash flow forecasting.""",
+                input=prompt,
+                tools=[{"type": "web_search"}],
                 temperature=0.7,
-                max_tokens=2500
+                max_output_tokens=2500
             )
             
-            analysis_text = response.choices[0].message.content
+            # Extract content from Response object
+            # The response.output is a list of ResponseOutput objects (web search calls + messages)
+            # We want the text from the final message
+            analysis_text = ""
+            logger.info(f"Response type: {type(response)}, has output: {hasattr(response, 'output')}")
+            
+            if hasattr(response, 'output') and isinstance(response.output, list):
+                logger.info(f"Response.output is list with {len(response.output)} items")
+                for idx, item in enumerate(response.output):
+                    logger.info(f"  Item {idx}: type={getattr(item, 'type', 'no-type')}")
+                    # Look for ResponseOutputMessage with content
+                    if hasattr(item, 'type') and item.type == 'message':
+                        if hasattr(item, 'content') and isinstance(item.content, list):
+                            logger.info(f"    Found message with {len(item.content)} content items")
+                            for content_item in item.content:
+                                if hasattr(content_item, 'text'):
+                                    text_len = len(content_item.text)
+                                    logger.info(f"      Extracted text: {text_len} characters")
+                                    analysis_text += content_item.text
+            
+            if not analysis_text:
+                # Fallback to string representation
+                analysis_text = str(response)
+                logger.warning(f"Could not extract text from response, using string representation ({len(analysis_text)} chars)")
+            else:
+                logger.info(f"Successfully extracted analysis text: {len(analysis_text)} characters")
             
             # Structure the response
-            return {
+            tokens_used = 0
+            if hasattr(response, 'usage') and response.usage:
+                tokens_used = getattr(response.usage, 'total_tokens', 0)
+            
+            result = {
                 'success': True,
                 'property_name': property_name,
                 'university': university,
@@ -106,13 +244,25 @@ Format your response as a structured analysis with clear sections and bullet poi
                 'analysis_date': self.current_date,
                 'current_month': current_month,
                 'analysis': analysis_text,
-                'tokens_used': response.usage.total_tokens
+                'tokens_used': tokens_used,
+                'ipeds_enabled': self.ipeds.enabled,
+                'enrollment_data': enrollment_data
             }
             
+            if enrollment_data:
+                logger.info(f"Analysis completed for {property_name} using official IPEDS enrollment data")
+            else:
+                logger.info(f"Analysis completed for {property_name} without enrollment data")
+            
+            return result
+            
         except Exception as e:
+            logger.error(f"Error in analyze_property_context: {str(e)}", exc_info=True)
+            import traceback
+            traceback.print_exc()
             return {
                 'success': False,
-                'error': str(e),
+                'error': str(e) if str(e) else repr(e),
                 'property_name': property_name
             }
     

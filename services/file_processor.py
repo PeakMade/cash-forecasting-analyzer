@@ -733,6 +733,7 @@ class FileProcessor:
         
         try:
             # Get full economic analysis
+            logger.info("Calling analyze_property_context()...")
             analysis_result = self.economic_analyzer.analyze_property_context(
                 property_name=property_name,
                 university=university,
@@ -741,6 +742,7 @@ class FileProcessor:
                 zip_code=zip_code,
                 current_month=current_month
             )
+            logger.info(f"analyze_property_context() returned: success={analysis_result.get('success')}")
             
             # Get seasonal factor for PROJECTED month (not current month)
             # We're analyzing projected FCF, so we need the season of the projected period
@@ -792,10 +794,12 @@ class FileProcessor:
             }
             
         except Exception as e:
-            logger.error(f"Error getting economic context: {str(e)}")
+            logger.error(f"Error getting economic context: {str(e)}", exc_info=True)
+            import traceback
+            traceback.print_exc()
             return {
                 'success': False,
-                'error': str(e),
+                'error': str(e) if str(e) else repr(e),
                 'seasonal_factor': {'season': 'Unknown', 'expected_occupancy': 'Unknown', 'cash_flow_pattern': 'Unknown'},
                 'enrollment_trend': 'unknown',
                 'new_supply': False,
