@@ -76,7 +76,8 @@ class FileProcessor:
                            balance_sheet_path: str,
                            property_info: Dict[str, Any],
                            reserve_months: int = 6,
-                           wc_target_ratio: float = 1.0) -> Dict[str, Any]:
+                           wc_target_ratio: float = 1.0,
+                           show_parameters: bool = True) -> Dict[str, Any]:
         """
         Process all three required files and generate comprehensive recommendation
         
@@ -87,6 +88,7 @@ class FileProcessor:
             property_info: Dictionary with property information (name, university, address, etc.)
             reserve_months: Required months of operating cash reserve (default: 6)
             wc_target_ratio: Target current ratio for working capital restoration (default: 1.0)
+            show_parameters: Whether to include Analysis Parameters section in output (default: True)
             
         Returns:
             Complete analysis with decision, executive summary, and detailed rationale
@@ -153,7 +155,8 @@ class FileProcessor:
                 balance_sheet_data=balance_data,
                 economic_analysis=economic_data,
                 reserve_months=reserve_months,
-                wc_target_ratio=wc_target_ratio
+                wc_target_ratio=wc_target_ratio,
+                show_parameters=show_parameters
             )
             
             return {

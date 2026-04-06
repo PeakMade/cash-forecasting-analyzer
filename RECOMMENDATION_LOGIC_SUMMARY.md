@@ -3,6 +3,35 @@
 
 ---
 
+## **Recent Updates (February 2025)**
+
+### **Risk-Aware Working Capital Crisis Thresholds**
+
+**Problem Identified:**
+- The Republic (January 2026) showed current ratio of 0.80:1, which **exceeded** its Low Risk target of 0.50:1
+- System was recommending $280K contribution despite healthy cash position
+- Property had just distributed $343K in January, indicating management confidence
+- Root cause: System used absolute crisis threshold (-$50K working capital) that ignored user's risk tolerance
+
+**Solution Implemented:**
+- **Changed from absolute to risk-relative crisis detection**
+- Crisis now triggers at: `Current Ratio < (User's Target Ratio × 0.80)`
+- **Example:** Low Risk target 0.50:1 → crisis at 0.40:1 (not -$50K)
+- Properties **exceeding** their target receive **DO_NOTHING** recommendation
+- **Updated current assets calculation** to include: Cash + AR + Prepaid + Other Current Assets (not just cash)
+- **Added recent distribution context** to executive summaries when property distributed >$100K
+
+**Impact:**
+- The Republic: Changed from "CONTRIBUTE $280K" to "DO_NOTHING" ✅
+- Campus Creek (ratio 0.14:1, negative FCF): Still correctly recommends "CONTRIBUTE" ✅
+- River Oaks (ratio 0.29:1, negative FCF): Still correctly recommends "CONTRIBUTE" ✅
+
+**Files Modified:**
+- `services/recommendation_engine.py`: Updated `_make_decision()`, `_generate_executive_summary()`
+- `services/recommendation_engine.py`: Fixed single-month projection edge case in `_analyze_multi_month_projection()`
+
+---
+
 ## **Overview**
 
 The Cash Forecast Analyzer uses a multi-factor decision framework to generate one of three recommendations:
@@ -74,14 +103,21 @@ NOI YTD Variance % = (NOI Actual - NOI Budget) / NOI Budget × 100
 
 **Critical Calculations:**
 ```
-Working Capital = Cash Balance - Current Liabilities
+Working Capital = Current Assets - Current Liabilities
 
-Current Ratio = Cash Balance / Current Liabilities
+Current Assets = Cash + Accounts Receivable + Prepaid Expenses + Other Current Assets
+
+Current Ratio = Current Assets / Current Liabilities
 ```
 
-**Working Capital Crisis Trigger:**
-- If `Working Capital < -$50,000` → **CONTRIBUTE** decision activated
-- Indicates property cannot meet near-term obligations
+**Working Capital Crisis Trigger (Risk-Aware):**
+- Crisis threshold is **relative to user's selected risk tolerance**, not absolute
+- **Formula:** `Crisis Threshold Ratio = User's WC Target Ratio × 0.80`
+- If `Current Ratio < Crisis Threshold Ratio` → **CONTRIBUTE** decision activated
+- **Example:** Low Risk target is 0.50:1, so crisis triggers at 0.40:1 (0.50 × 0.80)
+- **Philosophy:** Crisis only occurs when property falls significantly below the user's acceptable risk level
+- Properties **exceeding** their risk-adjusted target receive **DO_NOTHING** recommendation even with negative working capital
+- System now considers recent distributions (>$100K) as evidence of management's liquidity confidence
 
 ---
 
@@ -113,7 +149,7 @@ Target current ratio (cash/liabilities) for working capital restoration.
 
 ## **Contribution Calculation Logic**
 
-When a working capital crisis is detected (working capital < -$50K), the system calculates a required contribution with **three transparent components:**
+When a working capital crisis is detected (current ratio falls below 80% of the user's target ratio), the system calculates a required contribution with **three transparent components:**
 
 ### **Component 1: Forward Deficit Coverage**
 
@@ -239,7 +275,7 @@ Rounded: $680,000
 
 **Trigger Conditions (ALL must be true):**
 1. **Positive Projected FCF** > $50,000
-2. **Working Capital Healthy** (≥ -$50,000)
+2. **Working Capital Healthy** (Current Ratio ≥ 80% of user's target ratio)
 3. **Adequate Reserves** (Months of Reserves ≥ Risk Requirement)
 4. **No Material Performance Issues** (NOI variance not severely negative)
 
@@ -247,14 +283,14 @@ Rounded: $680,000
 ```
 Available for Distribution = MIN(
     Projected Operational FCF - (Monthly Operating Cost × Reserve Months),
-    Current Cash Balance - (Current Liabilities × WC Target Ratio) - Safety Buffer
+    Current Assets - (Current Liabilities × WC Target Ratio) - Safety Buffer
 )
 
 Final Amount = Round DOWN to nearest $10,000
 ```
 
 **Safety Buffers:**
-- Never distribute into working capital crisis
+- Never distribute into working capital crisis (below risk-adjusted threshold)
 - Maintain minimum reserve requirements
 - Conservative approach to preserve liquidity
 
@@ -263,14 +299,17 @@ Final Amount = Round DOWN to nearest $10,000
 ## **DO_NOTHING Decision Logic**
 
 **Trigger Conditions (ONE must be true):**
-1. **Reserves Below Minimum** but no working capital crisis
-2. **Projected Deficit** is minor and well within reserve capacity
-3. **Market Conditions** warrant conservative cash retention
-4. **Seasonal Patterns** suggest temporary variance
+1. **Reserves Below Minimum** but working capital meets or exceeds risk-adjusted target
+2. **Current Ratio Exceeds Target** - Property's working capital position is above the user's selected risk threshold, even if absolute value is negative
+3. **Projected Deficit** is minor and well within reserve capacity
+4. **Market Conditions** warrant conservative cash retention
+5. **Seasonal Patterns** suggest temporary variance
+6. **Recent Large Distribution** - Property distributed >$100K recently, indicating management confidence in liquidity
 
 **Rationale Focus:**
 - Building reserves to target level
 - Monitoring performance trends
+- Acknowledging healthy working capital relative to risk tolerance
 - Deferring distributions until reserve requirements met
 
 ---
@@ -380,13 +419,15 @@ All risk-based thresholds are configured via environment variables:
 
 1. **Working Capital Targets:** Are the current ratio targets (0.5/0.75/1.0) appropriate for student housing properties? Should Low Risk be even lower?
 
-2. **Risk-Based Philosophy:** The system now uses risk selection directly without performance multipliers. Does this give accountants the right level of control? Should we add other risk configurations?
+2. **Risk-Based Philosophy:** The system now uses risk selection directly and applies risk-adjusted crisis thresholds (80% of target ratio). Does this give accountants the right level of control? Should we add other risk configurations?
 
 3. **Reserve Month Ranges:** Current range is 2-6 months. Should this be wider (e.g., 1-9 months)?
 
-4. **Working Capital Crisis Threshold:** Currently triggers at -$50K. Should this be property-size dependent (e.g., % of budget)?
+4. **Crisis Threshold Multiplier:** Currently crisis triggers at 80% of the user's selected target ratio. Should this be adjustable (e.g., 70%, 85%)?
 
 5. **Distribution Conservatism:** Current logic is quite conservative. Should we allow distributions with lower reserve coverage if performance is strong?
+
+6. **Recent Distribution Context:** System now notes when property distributed >$100K recently as evidence of management confidence. Should this trigger different recommendations?
 
 ---
 

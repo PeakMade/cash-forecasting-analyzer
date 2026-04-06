@@ -735,6 +735,7 @@ def analyze_files():
         zip_code = request.form.get('zip_code', '').strip()
         university = request.form.get('university', '').strip()
         client_risk = request.form.get('client_risk', '').strip()
+        show_parameters = request.form.get('show_parameters', '0') == '1'  # Checkbox value
         
         if not all([property_entity, property_address, zip_code, university, client_risk]):
             return jsonify({'error': 'All property information fields are required'}), 400
@@ -821,7 +822,8 @@ def analyze_files():
             balance_sheet_path=balance_sheet_path,
             property_info=property_info,
             reserve_months=reserve_months,
-            wc_target_ratio=wc_target_ratio
+            wc_target_ratio=wc_target_ratio,
+            show_parameters=show_parameters
         )
         
         # Check if analysis failed due to data validation issues

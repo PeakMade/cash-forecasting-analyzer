@@ -82,26 +82,28 @@ class WordDocumentGenerator:
         
         doc.add_paragraph()  # Spacing
         
-        # Analysis Parameters section
-        params_heading = doc.add_heading('ANALYSIS PARAMETERS', level=2)
-        params_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        risk_selection = recommendation.get('risk_selection', 'UNKNOWN')
-        reserve_months = recommendation.get('reserve_months', 6)
-        wc_target = recommendation.get('wc_target_ratio', 1.0)
-        
-        params_para = doc.add_paragraph()
-        params_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        params_text = f"Risk Selection: {risk_selection}\n"
-        params_text += f"Reserve Months: {reserve_months} months\n"
-        params_text += f"Working Capital Target: {wc_target}:1 ratio"
-        
-        params_run = params_para.add_run(params_text)
-        params_run.font.size = Pt(14)
-        params_run.font.color.rgb = self.dark_gray
-        
-        doc.add_paragraph()  # Spacing
+        # Analysis Parameters section (conditional)
+        show_parameters = recommendation.get('show_parameters', True)
+        if show_parameters:
+            params_heading = doc.add_heading('ANALYSIS PARAMETERS', level=2)
+            params_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            risk_selection = recommendation.get('risk_selection', 'UNKNOWN')
+            reserve_months = recommendation.get('reserve_months', 6)
+            wc_target = recommendation.get('wc_target_ratio', 1.0)
+            
+            params_para = doc.add_paragraph()
+            params_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            params_text = f"Risk Selection: {risk_selection}\n"
+            params_text += f"Reserve Months: {reserve_months} months\n"
+            params_text += f"Working Capital Target: {wc_target}:1 ratio"
+            
+            params_run = params_para.add_run(params_text)
+            params_run.font.size = Pt(14)
+            params_run.font.color.rgb = self.dark_gray
+            
+            doc.add_paragraph()  # Spacing
         
         # Executive Decision
         decision = recommendation.get('decision', 'DO_NOTHING')
@@ -176,8 +178,9 @@ class WordDocumentGenerator:
             doc.add_paragraph(detailed['balance_sheet_analysis'])
             doc.add_paragraph()
         
-        # Economic & Market Context
-        if detailed.get('economic_context'):
+        # Economic & Market Context (conditional on show_parameters)
+        show_params = recommendation.get('show_parameters', True)
+        if show_params and detailed.get('economic_context'):
             doc.add_heading('Economic & Market Context', level=1)
             doc.add_paragraph(detailed['economic_context'])
             doc.add_paragraph()

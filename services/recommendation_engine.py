@@ -13,7 +13,7 @@ class RecommendationEngine:
             'minor_deficit': 50000,      # Less than $50k deficit = minor
             'moderate_deficit': 150000,  # $50k-$150k = moderate
             'major_deficit': 150000,     # More than $150k = major
-            'distribution_min': 100000,  # Minimum surplus to recommend distribution
+            'distribution_min': 50000,   # Minimum surplus to recommend distribution
             'cash_reserve_months': 6,    # Minimum months of reserves to maintain
         }
     
@@ -37,13 +37,15 @@ class RecommendationEngine:
     
     def analyze_and_recommend(self, cash_forecast_data: Dict, income_statement_data: Dict, 
                              balance_sheet_data: Dict, economic_analysis: Dict, 
-                             reserve_months: int = 6, wc_target_ratio: float = 1.0) -> Dict:
+                             reserve_months: int = 6, wc_target_ratio: float = 1.0,
+                             show_parameters: bool = True) -> Dict:
         """
         Generate comprehensive recommendation based on all input data
         
         Args:
             reserve_months: Required months of operating cash reserve (default: 6)
             wc_target_ratio: Target current ratio for working capital restoration (default: 1.0)
+            show_parameters: Whether to include Analysis Parameters section in output (default: True)
         
         Returns:
             dict: {
@@ -118,6 +120,9 @@ class RecommendationEngine:
         
         working_capital = current_assets - current_liabilities
         
+        # Get current distributions for context
+        current_distributions = cash_forecast_data.get('current_distributions', 0)
+        
         # Determine decision using ADJUSTED cash flow and multi-month analysis
         decision, amount, contribution_breakdown = self._make_decision(
             projected_fcf=occupancy_adjusted_fcf,  # Use adjusted value
@@ -133,7 +138,8 @@ class RecommendationEngine:
             seasonal_factor=seasonal_factor,
             enrollment_trend=enrollment_trend,
             multi_month_analysis=multi_month_analysis,  # NEW: Pass multi-month data
-            current_assets=current_assets  # NEW: Pass current assets for proper WC calculation
+            current_assets=current_assets,  # NEW: Pass current assets for proper WC calculation
+            current_distributions=current_distributions  # NEW: Pass recent distributions for context
         )
         
         # Round amount to nearest $10,000 BEFORE generating summaries
@@ -156,7 +162,8 @@ class RecommendationEngine:
             current_liabilities=current_liabilities,
             current_assets=current_assets,
             contribution_breakdown=contribution_breakdown,
-            multi_month_analysis=multi_month_analysis
+            multi_month_analysis=multi_month_analysis,
+            current_distributions=current_distributions
         )
         
         # Add occupancy adjustment note to summary if significant
@@ -173,7 +180,8 @@ class RecommendationEngine:
             amount=rounded_amount,
             months_of_reserves=months_of_reserves,
             occupancy_adjustment_note=occupancy_adjustment_note,
-            reserve_months=reserve_months
+            reserve_months=reserve_months,
+            show_parameters=show_parameters
         )
         
         # Get risk label for display
@@ -191,7 +199,8 @@ class RecommendationEngine:
             'risk_selection': risk_label,
             'reserve_months': reserve_months,
             'wc_target_ratio': wc_target_ratio,
-            'multi_month_analysis': multi_month_analysis  # NEW: Include 6-month analysis in output
+            'multi_month_analysis': multi_month_analysis,  # NEW: Include 6-month analysis in output
+            'show_parameters': show_parameters  # NEW: Toggle for Analysis Parameters display
         }
     
     def _adjust_fcf_for_occupancy(self, projected_fcf: float, current_occupancy: float, 
@@ -300,6 +309,29 @@ class RecommendationEngine:
         print(f"DEBUG: Total deltas: ${total_fcf:,.2f}, Average monthly delta: ${average_fcf:,.2f}")
         print(f"DEBUG: Using ALL {len(monthly_deltas)} deltas for forward projection")
         
+        # Handle edge case: only 1 month of data (no deltas)
+        if not monthly_deltas:
+            print(f"DEBUG: Only 1 month of data - using direct FCF value")
+            single_fcf = fcf_values[0] if fcf_values else 0
+            adjusted_single_fcf = single_fcf + total_reserves  # Add back reserves for single month
+            return {
+                'total_fcf': single_fcf,
+                'average_fcf': single_fcf,
+                'adjusted_avg_fcf': adjusted_single_fcf,
+                'adjusted_all_positive': adjusted_single_fcf >= 0,  # Use adjusted for distribution eligibility
+                'adjusted_lowest_month_fcf': adjusted_single_fcf,
+                'avg_monthly_reserves': total_reserves,
+                'monthly_deltas': [],
+                'lowest_month': {'month': projected_months[0]['month'], 'fcf': single_fcf} if projected_months else {'month': 'Unknown', 'fcf': 0},
+                'highest_month': {'month': projected_months[0]['month'], 'fcf': single_fcf} if projected_months else {'month': 'Unknown', 'fcf': 0},
+                'positive_months': 1 if single_fcf > 0 else 0,
+                'negative_months': 1 if single_fcf < 0 else 0,
+                'all_positive': single_fcf >= 0,
+                'trend': 'STABLE',
+                'months_analyzed': 1,
+                'total_reserves': total_reserves
+            }
+        
         # Find lowest and highest months based on deltas (not ending balances)
         lowest_delta_idx = monthly_deltas.index(min(monthly_deltas))
         highest_delta_idx = monthly_deltas.index(max(monthly_deltas))
@@ -329,9 +361,40 @@ class RecommendationEngine:
         else:
             trend = 'STABLE'
         
+        # Calculate adjusted metrics excluding voluntary reserve allocations
+        # Voluntary reserves (insurance, taxes, etc.) are prudent financial management,
+        # not operational deficits - should not penalize distribution eligibility
+        avg_monthly_reserves = total_reserves / len(projected_months) if projected_months else 0
+        adjusted_avg_fcf = average_fcf + avg_monthly_reserves
+        
+        # Check if all months would be positive after adding back reserves
+        adjusted_monthly_deltas = [d + avg_monthly_reserves for d in monthly_deltas]
+        adjusted_all_positive = all(d >= 0 for d in adjusted_monthly_deltas)
+        adjusted_lowest_month_fcf = min(adjusted_monthly_deltas) if adjusted_monthly_deltas else 0
+        
+        # For distribution eligibility, allow 1 negative month if:
+        # - Total FCF is strong (positive)
+        # - Trend is improving or stable
+        # - The negative month is minor relative to total performance
+        allow_one_negative = (
+            negative_months <= 1 and 
+            total_fcf > average_fcf * 3 and  # Total is at least 3x average (strong overall)
+            trend in ['IMPROVING', 'STABLE']
+        )
+        
+        distribution_eligible = adjusted_all_positive or allow_one_negative
+        effective_lowest = 0 if allow_one_negative else adjusted_lowest_month_fcf
+        
+        print(f"DEBUG: Adjusted avg FCF (excluding reserves): ${adjusted_avg_fcf:,.2f}")
+        print(f"DEBUG: Adjusted all_positive: {adjusted_all_positive}, allow_one_negative: {allow_one_negative}, distribution_eligible: {distribution_eligible}")
+        
         return {
             'total_fcf': total_fcf,
             'average_fcf': average_fcf,
+            'adjusted_avg_fcf': adjusted_avg_fcf,  # Average excluding voluntary reserves
+            'adjusted_all_positive': distribution_eligible,  # Eligible for distribution
+            'adjusted_lowest_month_fcf': effective_lowest,  # Treat as 0 if one negative allowed
+            'avg_monthly_reserves': avg_monthly_reserves,
             'monthly_deltas': monthly_deltas,
             'lowest_month': {'month': projected_months[lowest_delta_idx]['month'], 'fcf': monthly_deltas[lowest_delta_idx]},
             'highest_month': {'month': projected_months[highest_delta_idx]['month'], 'fcf': monthly_deltas[highest_delta_idx]},
@@ -396,7 +459,7 @@ class RecommendationEngine:
                       seasonal_factor: Dict, enrollment_trend: str, multi_month_analysis: Dict = None,
                       monthly_debt_service: float = 0, monthly_expenses: float = 0,
                       current_liabilities: float = 0, current_assets: float = 0,
-                      projected_operational_fcf: float = None) -> Tuple[str, float, Dict]:
+                      projected_operational_fcf: float = None, current_distributions: float = 0) -> Tuple[str, float, Dict]:
         """
         Make the primary decision: CONTRIBUTE, DISTRIBUTE, or DO_NOTHING
         Uses multi-month projection data when available for more robust analysis
@@ -412,18 +475,23 @@ class RecommendationEngine:
         if projected_operational_fcf is None:
             projected_operational_fcf = projected_fcf
         
-        # CRITICAL CHECK: Working capital crisis (current liabilities > current assets)
-        # This indicates past-due obligations or structural cash flow problems
-        if working_capital < -50000:
-            # Severe working capital deficit - property is behind on payments
+        # CRITICAL CHECK: Working capital deficit relative to risk tolerance
+        # Calculate current ratio and compare to target
+        wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
+        current_ratio = current_assets / max(current_liabilities, 1) if current_liabilities > 0 else 999
+        
+        # Trigger contribution if current ratio is significantly below target (20% margin)
+        # For Low Risk (0.5 target), triggers at 0.40; Medium (0.75) at 0.60; High (1.0) at 0.80
+        crisis_threshold_ratio = wc_target_ratio * 0.80
+        
+        if current_ratio < crisis_threshold_ratio:
+            # Working capital below risk-adjusted threshold
             # Calculate contribution with transparent breakdown:
             # 1. Multi-month projected deficits (not just one month)
             # 2. Working capital restoration (to target current ratio based on risk tolerance)
             # 3. Operating reserve buffer (based on user-selected reserve_months)
             
-            # Calculate working capital deficit based on user's risk tolerance
-            # Target: current_assets = current_liabilities * wc_target_ratio
-            wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
+            # Calculate working capital deficit to reach target
             target_current_assets = current_liabilities * wc_target_ratio
             wc_deficit = max(0, target_current_assets - current_assets)
             
@@ -537,20 +605,27 @@ class RecommendationEngine:
             # NEW: Use multi-month analysis for better distribution decisions
             if multi_month_analysis:
                 # Multi-month data available - use it for robust analysis
-                avg_fcf = multi_month_analysis['average_fcf']
-                all_positive = multi_month_analysis['all_positive']
+                # Use adjusted metrics that exclude voluntary reserve allocations
+                # (reserves are prudent financial management, not operational deficits)
+                avg_fcf = multi_month_analysis.get('adjusted_avg_fcf', multi_month_analysis['average_fcf'])
+                all_positive = multi_month_analysis.get('adjusted_all_positive', multi_month_analysis['all_positive'])
+                lowest_month_fcf = multi_month_analysis.get('adjusted_lowest_month_fcf', multi_month_analysis['lowest_month']['fcf'])
                 total_fcf = multi_month_analysis['total_fcf']
-                lowest_month_fcf = multi_month_analysis['lowest_month']['fcf']
                 months_analyzed = multi_month_analysis['months_analyzed']
                 
+                print(f"DEBUG: Distribution check - avg_fcf: ${avg_fcf:,.2f}, all_positive: {all_positive}, lowest: ${lowest_month_fcf:,.2f}, reserves: {months_of_reserves:.1f}mo")
+                print(f"DEBUG: Criteria checks - avg>{self.decision_thresholds['distribution_min']}: {avg_fcf > self.decision_thresholds['distribution_min']}, all_pos: {all_positive}, lowest>=0: {lowest_month_fcf >= 0}, reserves>10: {months_of_reserves > 10}")
+                
                 # Recommend distribution if:
-                # 1. ALL projected months are positive
-                # 2. Average FCF > $100k
-                # 3. Even lowest month is positive
+                # 1. ALL projected months are positive (after excluding voluntary reserves, or allowing 1 negative if strong)
+                # 2. Average operational FCF > $50k (after excluding voluntary reserves)
+                # 3. Lowest month is >= 0 (may be exactly 0 if we allowed 1 negative month)
                 # 4. Reserves are strong (>10 months currently)
                 
                 if all_positive and avg_fcf > self.decision_thresholds['distribution_min'] and \
-                   lowest_month_fcf > 0 and months_of_reserves > 10:
+                   lowest_month_fcf >= 0 and months_of_reserves > 10:
+                    
+                    print(f"DEBUG: Distribution criteria MET - proceeding to calculate safe amount")
                     
                     # Calculate safe distribution:
                     # Keep enough cash to maintain minimum reserve_months of reserves AFTER distribution
@@ -583,20 +658,27 @@ class RecommendationEngine:
                     }
                     reserves_after = self._calculate_reserves_after_distribution(balance_data_dict, safe_distribution)
                     
+                    print(f"DEBUG: Distribution calculation - safe_distribution: ${safe_distribution:,.2f}, reserves_after: {reserves_after:.1f}mo, required: {self.decision_thresholds['cash_reserve_months']}mo")
+                    print(f"DEBUG: Components - total_fcf: ${total_fcf:,.2f}, max_safe: ${max_safe_distribution:,.2f}, required_reserve: ${required_reserve:,.2f}")
+                    
                     if safe_distribution > 50000 and reserves_after >= self.decision_thresholds['cash_reserve_months']:
                         return ('DISTRIBUTE', safe_distribution, None)
                     else:
+                        print(f"DEBUG: Distribution blocked - amount check: {safe_distribution > 50000}, reserves check: {reserves_after >= self.decision_thresholds['cash_reserve_months']}")
                         return ('DO_NOTHING', None, None)
                 
                 # If NOT all positive months, or lowest month concerning, hold cash
                 elif not all_positive or lowest_month_fcf < 0:
+                    print(f"DEBUG: Distribution blocked - all_positive: {all_positive}, lowest_month_fcf: ${lowest_month_fcf:,.2f}")
                     return ('DO_NOTHING', None, None)
                 
                 # If avg FCF positive but low, wait longer
                 elif avg_fcf < self.decision_thresholds['distribution_min']:
+                    print(f"DEBUG: Distribution blocked - avg_fcf ${avg_fcf:,.2f} < threshold ${self.decision_thresholds['distribution_min']:,.2f}")
                     return ('DO_NOTHING', None, None)
                 
                 else:
+                    print(f"DEBUG: Distribution blocked - unknown reason")
                     return ('DO_NOTHING', None, None)
             
             else:
@@ -626,16 +708,35 @@ class RecommendationEngine:
                                    enrollment_trend: str, working_capital: float = 0,
                                    current_liabilities: float = 0, current_assets: float = 0,
                                    contribution_breakdown: Dict = None,
-                                   multi_month_analysis: Dict = None) -> List[str]:
+                                   multi_month_analysis: Dict = None, current_distributions: float = 0) -> List[str]:
         """Generate 5-7 executive summary bullet points supporting the decision"""
         
         bullets = []
         
-        # PRIORITY BULLET: Working capital crisis warning
-        if working_capital < -50000:
-            # Use actual current assets (cash + accounts receivable) for accurate current ratio
+        # PRIORITY BULLET: Working capital assessment (contextual based on risk tolerance)
+        if working_capital < 0:
             current_ratio = current_assets / max(current_liabilities, 1)
-            bullets.append(f"⚠️ **WORKING CAPITAL CRISIS**: Current liabilities (${current_liabilities:,.0f}) exceed current assets (${current_assets:,.0f}) by ${abs(working_capital):,.0f}. Current ratio of {current_ratio:.2f}:1 indicates significant past-due obligations or structural cash flow problems. **FULL LIABILITY BREAKDOWN ANALYSIS REQUIRED BEFORE ANY CAPITAL DECISION**")
+            wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
+            risk_label = self._get_risk_label()
+            
+            # Recent distribution context
+            recent_dist_context = ""
+            if current_distributions > 100000:
+                recent_dist_context = f" Note: Property distributed ${abs(current_distributions):,.0f} in the prior month, indicating management confidence in liquidity position."
+            
+            # Contextual messaging based on how current ratio compares to target
+            if current_ratio >= wc_target_ratio:
+                # Meeting or exceeding target - acknowledge but don't alarm
+                bullets.append(f"Working capital ratio of {current_ratio:.2f}:1 (current assets ${current_assets:,.0f}, liabilities ${current_liabilities:,.0f}) is **above the {risk_label} target of {wc_target_ratio:.2f}:1**, though below conventional 1.0:1 standard.{recent_dist_context}")
+            elif current_ratio >= wc_target_ratio * 0.80:
+                # Within 20% of target - caution but not crisis
+                bullets.append(f"⚠️ Working capital ratio of {current_ratio:.2f}:1 is **slightly below the {risk_label} target of {wc_target_ratio:.2f}:1** (current assets ${current_assets:,.0f}, liabilities ${current_liabilities:,.0f}). Monitor closely and consider gradual reserve building.{recent_dist_context}")
+            elif current_ratio >= 0.5:
+                # Below target but not critical
+                bullets.append(f"⚠️ **WORKING CAPITAL BELOW TARGET**: Current ratio of {current_ratio:.2f}:1 is below the {risk_label} requirement of {wc_target_ratio:.2f}:1 (current assets ${current_assets:,.0f}, liabilities ${current_liabilities:,.0f}). Recommend liability review and reserve building.{recent_dist_context}")
+            else:
+                # Severe - below widely accepted minimums
+                bullets.append(f"🚨 **WORKING CAPITAL CRISIS**: Current ratio of {current_ratio:.2f}:1 is critically low (current assets ${current_assets:,.0f}, liabilities ${current_liabilities:,.0f}). This indicates potential past-due obligations or structural cash flow problems. **FULL LIABILITY BREAKDOWN ANALYSIS REQUIRED BEFORE ANY CAPITAL DECISION**.{recent_dist_context}")
         
         # Bullet 1: The decision
         if decision == 'CONTRIBUTE':
@@ -767,14 +868,14 @@ class RecommendationEngine:
     def _generate_detailed_rationale(self, cash_forecast_data: Dict, income_statement_data: Dict,
                                     balance_sheet_data: Dict, economic_analysis: Dict,
                                     decision: str, amount: float, months_of_reserves: float,
-                                    occupancy_adjustment_note: str = None, reserve_months: int = 6) -> Dict:
+                                    occupancy_adjustment_note: str = None, reserve_months: int = 6,
+                                    show_parameters: bool = True) -> Dict:
         """Generate detailed multi-page analysis"""
         
-        return {
-            'cash_forecast_analysis': self._format_cash_forecast_details(cash_forecast_data, reserve_months),
+        rationale = {
+            'cash_forecast_analysis': self._format_cash_forecast_details(cash_forecast_data, reserve_months, show_parameters),
             'income_statement_analysis': self._format_income_statement_details(income_statement_data),
             'balance_sheet_analysis': self._format_balance_sheet_details(balance_sheet_data, months_of_reserves, reserve_months),
-            'economic_context': self._format_economic_context(economic_analysis),
             'risk_assessment': self._generate_risk_assessment(
                 cash_forecast_data, income_statement_data, balance_sheet_data, economic_analysis, reserve_months
             ),
@@ -783,15 +884,23 @@ class RecommendationEngine:
                 balance_sheet_data, economic_analysis, months_of_reserves, reserve_months
             )
         }
+        
+        # Only include economic context if show_parameters is True
+        if show_parameters:
+            rationale['economic_context'] = self._format_economic_context(economic_analysis)
+        
+        return rationale
     
-    def _format_cash_forecast_details(self, data: Dict, reserve_months: int = 6) -> str:
+    def _format_cash_forecast_details(self, data: Dict, reserve_months: int = 6, show_parameters: bool = True) -> str:
         """Format cash forecast section"""
         
         # Get risk label
         risk_label = self._get_risk_label()
         wc_target_ratio = self.decision_thresholds.get('wc_target_ratio', 1.0)
         
-        base_analysis = f"""
+        # Conditionally include Analysis Parameters section
+        if show_parameters:
+            base_analysis = f"""
 ANALYSIS PARAMETERS
 {'='*78}
 
@@ -802,7 +911,14 @@ Risk Selection: {risk_label}
 {'='*78}
 CASH FORECAST ANALYSIS
 {'='*78}
-
+"""
+        else:
+            base_analysis = f"""
+CASH FORECAST ANALYSIS
+{'='*78}
+"""
+        
+        base_analysis += f"""
 Property: {data.get('property_name', 'Unknown')}
 Current Month: {data.get('current_month', 'Unknown')} (Actual)
 Projected Month: {data.get('projected_month', 'Unknown')} (Budget)
