@@ -5,6 +5,7 @@ Connects to SharePoint Online list for property data lookup
 
 import os
 import logging
+import requests
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from office365.sharepoint.client_context import ClientContext
@@ -17,17 +18,24 @@ logger = logging.getLogger(__name__)
 class SharePointDataSource:
     """Handle SharePoint Online connections and property data queries"""
     
-    def __init__(self, access_token: Optional[str] = None):
+    def __init__(self, access_token: Optional[str] = None, app_only_token: Optional[str] = None):
         """
-        Initialize SharePoint data source
+        Initialize SharePoint data source with dual authentication
         
         Args:
-            access_token: User's access token for delegated authentication
+            access_token: User's access token for delegated authentication (reading data)
+            app_only_token: Application's token for app-only operations (logging)
         """
         self.site_url = os.environ.get('SHAREPOINT_SITE_URL', '')
         self.list_name = os.environ.get('SHAREPOINT_LIST_NAME', 'Properties_0')
-        self.log_list_name = 'Innovation Use Log'
+        self.log_list_name = os.environ.get('SHAREPOINT_LOG_LIST_NAME', 'Innovation Use Log')
         self.access_token = access_token
+        self.app_only_token = app_only_token
+        self._logging_available = None  # Cache whether logging list exists
+        
+        # Cache for Graph API logging
+        self._graph_site_id = None
+        self._graph_list_id = None
         
         if not self.site_url:
             raise ValueError("SHAREPOINT_SITE_URL is required")
@@ -44,11 +52,6 @@ class SharePointDataSource:
             if not self.access_token:
                 raise ValueError("Access token required for SharePoint authentication")
             
-            print(f"=== CREATING SHAREPOINT CONTEXT ===")
-            print(f"Site URL: {self.site_url}")
-            print(f"Access token length: {len(self.access_token)}")
-            print(f"Access token starts with: {self.access_token[:50]}...")
-            
             # Create client context with access token
             # with_access_token() expects a callable that returns a TokenResponse object
             def token_provider():
@@ -59,12 +62,38 @@ class SharePointDataSource:
             
             ctx = ClientContext(self.site_url).with_access_token(token_provider)
             
-            print(f"=== CONTEXT CREATED SUCCESSFULLY ===")
-            
             logger.debug(f"Connected to SharePoint using user token: {self.site_url}")
             return ctx
         except Exception as e:
             logger.error(f"SharePoint connection error: {str(e)}")
+            raise
+    
+    def _get_app_context(self) -> ClientContext:
+        """
+        Create SharePoint client context with app-only token
+        Uses application permissions - app acts as itself, not as user
+        Used for logging operations to prevent users from needing SharePoint permissions
+        
+        Returns:
+            ClientContext object for SharePoint operations
+        """
+        try:
+            if not self.app_only_token:
+                raise ValueError("App-only token required for application operations")
+            
+            # Create client context with app-only token
+            def token_provider():
+                token = TokenResponse()
+                token.accessToken = self.app_only_token
+                token.tokenType = "Bearer"
+                return token
+            
+            ctx = ClientContext(self.site_url).with_access_token(token_provider)
+            
+            logger.debug(f"Connected to SharePoint using app-only token: {self.site_url}")
+            return ctx
+        except Exception as e:
+            logger.error(f"SharePoint app-only connection error: {str(e)}")
             raise
     
     def get_property_info(self, property_identifier: str) -> Optional[Dict[str, Any]]:
@@ -208,17 +237,202 @@ class SharePointDataSource:
             logger.error(f"Error listing SharePoint properties: {str(e)}")
             raise
     
+    def _get_graph_site_id(self, graph_token: str) -> Optional[str]:
+        """
+        Resolve SharePoint site ID via Microsoft Graph API
+        Caches the result for subsequent calls
+        
+        Args:
+            graph_token: Microsoft Graph access token
+            
+        Returns:
+            SharePoint site ID or None if resolution fails
+        """
+        if self._graph_site_id:
+            return self._graph_site_id
+        
+        try:
+            # Parse site URL to get host and path
+            # e.g., https://peakcampus.sharepoint.com/sites/BaseCampApps
+            from urllib.parse import urlparse
+            parsed = urlparse(self.site_url)
+            host = parsed.netloc  # e.g., peakcampus.sharepoint.com
+            path = parsed.path    # e.g., /sites/BaseCampApps
+            
+            # Query Graph API for site ID
+            graph_url = f"https://graph.microsoft.com/v1.0/sites/{host}:{path}"
+            headers = {
+                'Authorization': f'Bearer {graph_token}',
+                'Accept': 'application/json'
+            }
+            
+            response = requests.get(graph_url, headers=headers)
+            response.raise_for_status()
+            
+            site_data = response.json()
+            self._graph_site_id = site_data.get('id')
+            
+            logger.info(f"Resolved SharePoint site ID via Graph: {self._graph_site_id}")
+            return self._graph_site_id
+            
+        except Exception as e:
+            logger.error(f"Failed to resolve SharePoint site ID: {str(e)}")
+            return None
+    
+    def _get_graph_list_id(self, graph_token: str, site_id: str) -> Optional[str]:
+        """
+        Resolve SharePoint list ID via Microsoft Graph API
+        Caches the result for subsequent calls
+        
+        Args:
+            graph_token: Microsoft Graph access token
+            site_id: SharePoint site ID
+            
+        Returns:
+            SharePoint list ID or None if resolution fails
+        """
+        if self._graph_list_id:
+            return self._graph_list_id
+        
+        try:
+            # Query Graph API for list by display name
+            graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists"
+            headers = {
+                'Authorization': f'Bearer {graph_token}',
+                'Accept': 'application/json'
+            }
+            params = {
+                '$filter': f"displayName eq '{self.log_list_name}'"
+            }
+            
+            response = requests.get(graph_url, headers=headers, params=params)
+            response.raise_for_status()
+            
+            data = response.json()
+            lists = data.get('value', [])
+            
+            if not lists:
+                logger.error(f"SharePoint list '{self.log_list_name}' not found")
+                return None
+            
+            self._graph_list_id = lists[0].get('id')
+            logger.info(f"Resolved SharePoint list ID via Graph: {self._graph_list_id}")
+            return self._graph_list_id
+            
+        except Exception as e:
+            logger.error(f"Failed to resolve SharePoint list ID: {str(e)}")
+            return None
+    
+    def _log_via_graph(self, user_email: str, user_name: str, activity_type: str,
+                      property_name: Optional[str], file_names: Optional[str],
+                      application: str, environment: str, session_id: Optional[str]) -> bool:
+        """
+        Log activity to SharePoint via Microsoft Graph API (app-only)
+        This is more reliable than SharePoint REST API
+        
+        Args:
+            user_email: User's email address
+            user_name: User's display name
+            activity_type: Type of activity
+            property_name: Optional property name
+            file_names: Optional file names
+            application: Application name
+            environment: Environment name
+            session_id: Session ID
+            
+        Returns:
+            True if logging successful, False otherwise
+        """
+        if not self.app_only_token:
+            logger.warning("No app-only token available for Graph API logging")
+            return False
+        
+        try:
+            # Get site ID
+            site_id = self._get_graph_site_id(self.app_only_token)
+            if not site_id:
+                return False
+            
+            # Get list ID
+            list_id = self._get_graph_list_id(self.app_only_token, site_id)
+            if not list_id:
+                self._logging_available = False
+                return False
+            
+            # Create log entry
+            log_entry = {
+                'fields': {
+                    'Title': user_email,  # SharePoint requires Title field
+                    'UserEmail': user_email,
+                    'UserName': user_name,
+                    'LoginTimestamp': datetime.utcnow().isoformat() + 'Z',
+                    'UserRole': 'user',
+                    'ActivityType': activity_type,
+                    'Application': application,
+                    'Env': environment
+                }
+            }
+            
+            # Add optional fields
+            if session_id:
+                log_entry['fields']['SessionID'] = session_id
+            if property_name:
+                log_entry['fields']['PropertyName'] = property_name
+            if file_names:
+                log_entry['fields']['FileNames'] = file_names
+            
+            # Post to Graph API
+            graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items"
+            headers = {
+                'Authorization': f'Bearer {self.app_only_token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            response = requests.post(graph_url, json=log_entry, headers=headers)
+            response.raise_for_status()
+            
+            logger.info(f"Successfully logged activity via Graph: {activity_type} for {user_email}")
+            self._logging_available = True
+            return True
+            
+        except requests.HTTPError as e:
+            status_code = e.response.status_code if e.response else 0
+            error_msg = e.response.text if e.response else str(e)
+            
+            print(f"=== GRAPH API LOGGING ERROR: HTTP {status_code} ===")
+            print(f"=== Error: {error_msg} ===")
+            
+            if status_code == 404:
+                logger.error(f"SharePoint list '{self.log_list_name}' not found via Graph API")
+                self._logging_available = False
+            elif status_code in [401, 403]:
+                logger.error(f"Graph API returned {status_code} - check Azure AD app permissions")
+                print(f"=== Ensure 'Sites.ReadWrite.All' application permission is granted in Azure AD ===")
+            else:
+                logger.error(f"Graph API logging failed: {error_msg}")
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Exception during Graph API logging: {str(e)}")
+            print(f"=== GRAPH API EXCEPTION: {str(e)} ===")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     def log_activity(self, user_email: str, user_name: str, activity_type: str, 
                     property_name: str = None, file_names: str = None, 
                     application: str = 'CashForecastAnalyzer', environment: str = 'Prod',
                     session_id: str = None) -> bool:
         """
         Log user activity to Innovation Use Log SharePoint list
+        Uses Microsoft Graph API with app-only token (more reliable than SharePoint REST)
         
         Args:
             user_email: User's email address
             user_name: User's display name
-            activity_type: Type of activity (e.g., 'session_start', 'session_end', 'analysis_successful', 'analysis_failed')
+            activity_type: Type of activity (e.g., 'Start Session', 'End Session', 'analysis_successful', 'analysis_failed')
             property_name: Optional property name for analysis activities
             file_names: Optional comma-separated list of uploaded filenames
             application: Application name (default: 'CashForecastAnalyzer')
@@ -228,51 +442,28 @@ class SharePointDataSource:
         Returns:
             True if logging successful, False otherwise
         """
-        try:
-            # Debug: decode token to see what permissions we have
-            import base64
-            import json
-            token_parts = self.access_token.split('.')
-            if len(token_parts) >= 2:
-                # Decode the payload (add padding if needed)
-                payload = token_parts[1]
-                payload += '=' * (4 - len(payload) % 4)
-                decoded = base64.b64decode(payload)
-                token_info = json.loads(decoded)
-                print(f"=== TOKEN SCOPES: {token_info.get('scp', 'N/A')} ===")
-                print(f"=== TOKEN AUDIENCE: {token_info.get('aud', 'N/A')} ===")
-            
-            ctx = self._get_context()
-            log_list = ctx.web.lists.get_by_title(self.log_list_name)
-            
-            # Create log entry with correct field names
-            log_entry = {
-                'UserEmail': user_email,
-                'UserName': user_name,
-                'LoginTimestamp': datetime.utcnow().isoformat() + 'Z',  # Note: LoginTimestamp not LoginTimeStamp
-                'UserRole': 'user',
-                'ActivityType': activity_type,
-                'Application': application,
-                'Env': environment
-            }
-            
-            # Add optional fields if provided
-            if session_id:
-                log_entry['SessionID'] = session_id
-            if property_name:
-                log_entry['PropertyName'] = property_name
-            if file_names:
-                log_entry['FileNames'] = file_names
-            
-            log_list.add_item(log_entry).execute_query()
-            logger.info(f"Logged activity: {activity_type} for {user_email}")
-            return True
-            
-        except Exception as e:
-            # Log error but don't break the application flow
-            logger.error(f"Failed to log activity to SharePoint: {str(e)}")
-            print(f"=== ERROR LOGGING ACTIVITY: {str(e)} ===")
+        # Skip if we've already determined logging is unavailable for this instance
+        if self._logging_available is False:
             return False
+        
+        # Use app-only token for logging (app writes as itself, not as user)
+        if not self.app_only_token:
+            logger.warning("No app-only token available for logging. Skipping activity log.")
+            print("=== WARNING: No app-only token for logging ===")
+            return False
+        
+        # Use Graph API for logging (more reliable than SharePoint REST)
+        print(f"=== LOGGING ACTIVITY VIA GRAPH API: {activity_type} for {user_email} ===")
+        return self._log_via_graph(
+            user_email=user_email,
+            user_name=user_name,
+            activity_type=activity_type,
+            property_name=property_name,
+            file_names=file_names,
+            application=application,
+            environment=environment,
+            session_id=session_id
+        )
     
     def test_connection(self) -> bool:
         """

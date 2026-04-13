@@ -194,9 +194,16 @@ def auth_callback():
     try:
         from services.data_source_factory import get_property_data_source
         access_token = azure_auth.get_sharepoint_token()
-        if access_token:
-            db = get_property_data_source(access_token=access_token)
-            db.log_activity(
+        app_token = azure_auth.get_app_only_token()
+        
+        if not app_token:
+            print("=== WARNING: App-only token not available - logging disabled ===")
+            print("=== See FIX_SHAREPOINT_APP_LOGGING.md for setup instructions ===")
+        elif not access_token:
+            print("=== WARNING: User token not available - cannot access SharePoint ===")
+        else:
+            db = get_property_data_source(access_token=access_token, app_only_token=app_token)
+            log_result = db.log_activity(
                 user_email=session['user']['email'],
                 user_name=session['user']['name'],
                 activity_type='Start Session',
@@ -204,12 +211,17 @@ def auth_callback():
                 environment=get_environment_name(),
                 session_id=get_session_id()
             )
-            # Set timestamp immediately after logging to prevent duplicate log in index route
-            session['last_session_start'] = datetime.now().isoformat()
-            print(f"=== SESSION START LOGGED in auth/callback, timestamp set: {session['last_session_start']} ===")
+            if log_result:
+                # Set timestamp immediately after logging to prevent duplicate log in index route
+                session['last_session_start'] = datetime.now().isoformat()
+                print(f"=== SESSION START LOGGED in auth/callback, timestamp set: {session['last_session_start']} ===")
+            else:
+                print("=== WARNING: Session start logging failed - check SharePoint permissions ===")
+                print("=== See FIX_SHAREPOINT_APP_LOGGING.md for troubleshooting ===")
     except Exception as e:
         # Don't break login if logging fails
         print(f"=== WARNING: Failed to log session start: {str(e)} ===")
+        print("=== Logging is disabled but authentication continues ===")
     
     # Redirect directly to index - no second consent needed
     return redirect(url_for('index'))
@@ -238,9 +250,15 @@ def logout():
         user_email = session.get('user', {}).get('email', 'unknown')
         user_name = session.get('user', {}).get('name', 'unknown')
         access_token = azure_auth.get_sharepoint_token()
-        if access_token:
-            db = get_property_data_source(access_token=access_token)
-            db.log_activity(
+        app_token = azure_auth.get_app_only_token()
+        
+        if not app_token:
+            print(f"=== WARNING: App-only token not available - cannot log session end for {user_name} ===")
+        elif not access_token:
+            print(f"=== WARNING: User token not available - cannot access SharePoint for {user_name} ===")
+        else:
+            db = get_property_data_source(access_token=access_token, app_only_token=app_token)
+            log_result = db.log_activity(
                 user_email=user_email,
                 user_name=user_name,
                 activity_type='End Session',
@@ -248,7 +266,10 @@ def logout():
                 environment=get_environment_name(),
                 session_id=current_session_id
             )
-            print(f"=== SESSION END LOGGED for {user_name} with SessionID: {current_session_id} ===")
+            if log_result:
+                print(f"=== SESSION END LOGGED for {user_name} with SessionID: {current_session_id} ===")
+            else:
+                print(f"=== WARNING: Session end logging failed for {user_name} ===")
     except Exception as e:
         # Don't break logout if logging fails
         print(f"=== WARNING: Failed to log session end activity: {str(e)} ===")
@@ -338,7 +359,8 @@ def session_start():
         
         # Log session restart
         from services.data_source_factory import get_property_data_source
-        db = get_property_data_source(access_token=token)
+        app_token = azure_auth.get_app_only_token()
+        db = get_property_data_source(access_token=token, app_only_token=app_token)
         db.log_activity(
             user_email=session['user']['email'],
             user_name=session['user']['name'],
@@ -573,9 +595,11 @@ def index():
         try:
             from services.data_source_factory import get_property_data_source
             access_token = azure_auth.get_sharepoint_token()
+            app_token = azure_auth.get_app_only_token()
             print(f"=== ACCESS TOKEN ACQUIRED: {access_token is not None} ===")
-            if access_token:
-                db = get_property_data_source(access_token=access_token)
+            print(f"=== APP TOKEN ACQUIRED: {app_token is not None} ===")
+            if access_token and app_token:
+                db = get_property_data_source(access_token=access_token, app_only_token=app_token)
                 # Generate new logical session ID for new session (timeout or first access)
                 import uuid
                 session['logical_session_id'] = str(uuid.uuid4())
@@ -592,7 +616,7 @@ def index():
                 session['last_session_start'] = current_time.isoformat()
                 print(f"=== SESSION START LOGGED for {user_info.get('name')} at {current_time} ===")
             else:
-                print("=== WARNING: No access token, cannot log session start ===")
+                print("=== WARNING: No access/app token, cannot log session start ===")
         except Exception as e:
             print(f"=== ERROR: Failed to log session start: {str(e)} ===")
             import traceback
@@ -834,7 +858,9 @@ def analyze_files():
             # Log failed analysis with specific details
             try:
                 user = get_user()
-                db.log_activity(
+                app_token = azure_auth.get_app_only_token()
+                db_log = get_property_data_source(access_token=access_token, app_only_token=app_token)
+                db_log.log_activity(
                     user_email=user.get('email', 'unknown'),
                     user_name=user.get('name', 'Unknown User'),
                     activity_type='Failed Analysis',
@@ -874,7 +900,9 @@ def analyze_files():
         # Log successful analysis
         try:
             user = get_user()
-            db.log_activity(
+            app_token = azure_auth.get_app_only_token()
+            db_log = get_property_data_source(access_token=access_token, app_only_token=app_token)
+            db_log.log_activity(
                 user_email=user.get('email', 'unknown'),
                 user_name=user.get('name', 'Unknown User'),
                 activity_type='Successful Analysis',
@@ -911,8 +939,9 @@ def analyze_files():
             
             # Get access token and log activity
             access_token = azure_auth.get_sharepoint_token()
+            app_token = azure_auth.get_app_only_token()
             from services.data_source_factory import get_property_data_source
-            db = get_property_data_source(access_token=access_token)
+            db = get_property_data_source(access_token=access_token, app_only_token=app_token)
             
             db.log_activity(
                 user_email=user.get('email', 'unknown'),
@@ -997,7 +1026,8 @@ def get_properties():
                 'needs_consent': True,
                 'consent_url': url_for('sharepoint_consent')
             }), 401
-            
+        
+        # For reading properties, we only need user token (no app token needed)
         db = get_property_data_source(access_token=access_token)
         print("=== FETCHING PROPERTIES FROM SHAREPOINT ===")
         properties = db.list_all_properties()
@@ -1032,6 +1062,7 @@ def get_property_details(entity_number):
         print(f"=== FETCHING PROPERTY DETAILS FOR: {entity_number} ===")
         from services.data_source_factory import get_property_data_source
         access_token = azure_auth.get_sharepoint_token()
+        # For reading properties, we only need user token (no app token needed)
         db = get_property_data_source(access_token=access_token)
         property_info = db.get_property_info(str(entity_number))
         if property_info:

@@ -183,6 +183,58 @@ class AzureADAuth:
         
         return None
     
+    def get_app_only_token(self):
+        """
+        Get app-only access token using client credentials (application permissions)
+        Uses Microsoft Graph API for SharePoint logging operations
+        
+        Returns:
+            Access token string for app-only operations or None if acquisition fails
+        """
+        try:
+            print("=== ACQUIRING APP-ONLY TOKEN FOR GRAPH API ===")
+            print(f"Client ID: {self.client_id[:8]}...")
+            print(f"Tenant ID: {self.tenant_id}")
+            print(f"Authority: {self.authority}")
+            
+            msal_app = self.get_msal_app()
+            
+            # Use client credentials flow for application permissions
+            # Use Graph API scope instead of SharePoint - more reliable!
+            result = msal_app.acquire_token_for_client(
+                scopes=["https://graph.microsoft.com/.default"]
+            )
+            
+            print(f"=== TOKEN RESULT KEYS: {result.keys() if result else 'None'} ===")
+            
+            if "access_token" in result:
+                token_length = len(result["access_token"])
+                print(f"=== GRAPH API APP-ONLY TOKEN ACQUIRED: {token_length} chars ===")
+                logger.info(f"Successfully acquired app-only Graph token (length: {token_length})")
+                return result["access_token"]
+            else:
+                error_desc = result.get('error_description', result.get('error', 'Unknown error'))
+                error_code = result.get('error', 'no_error_code')
+                print(f"=== APP-ONLY TOKEN ACQUISITION FAILED ===")
+                print(f"Error Code: {error_code}")
+                print(f"Error Description: {error_desc}")
+                print(f"\nTo fix:")
+                print(f"  1. Go to Azure Portal → Azure AD → App Registrations")
+                print(f"  2. Select your app: {self.client_id}")
+                print(f"  3. Go to 'API permissions'")
+                print(f"  4. Add permission → Microsoft Graph → Application permissions")
+                print(f"  5. Select 'Sites.ReadWrite.All'")
+                print(f"  6. Click 'Grant admin consent' button")
+                logger.error(f"Failed to acquire app-only token: {error_code} - {error_desc}")
+                return None
+                
+        except Exception as e:
+            print(f"=== EXCEPTION ACQUIRING APP-ONLY TOKEN: {str(e)} ===")
+            import traceback
+            traceback.print_exc()
+            logger.error(f"Exception acquiring app-only token: {str(e)}")
+            return None
+    
     def get_sharepoint_token(self):
         """
         Get SharePoint-specific access token with automatic refresh
