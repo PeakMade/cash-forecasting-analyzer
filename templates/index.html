@@ -321,6 +321,9 @@
 
 {% block scripts %}
 <script>
+// Saved form data from previous analysis (passed from backend)
+const savedData = {{ saved_data | tojson | safe }} || null;
+
 // Load properties on page load
 window.addEventListener('DOMContentLoaded', async () => {
     try {
@@ -339,6 +342,12 @@ window.addEventListener('DOMContentLoaded', async () => {
             });
             loadingText.textContent = `${data.length} properties available`;
             loadingText.style.color = '#28a745';
+            
+            // Pre-populate form with saved data if available
+            if (savedData) {
+                console.log('Restoring previous analysis data:', savedData);
+                restoreSavedFormData();
+            }
         } else if (data.needs_consent) {
             // User needs to grant SharePoint access
             loadingText.innerHTML = 'SharePoint access required. <a href="' + data.consent_url + '">Click here to authorize</a>';
@@ -394,6 +403,57 @@ document.getElementById('property_name').addEventListener('change', async functi
     }
 });
 
+// Restore saved form data from previous analysis
+function restoreSavedFormData() {
+    if (!savedData) return;
+    
+    console.log('Restoring form data:', savedData);
+    
+    // Restore form fields
+    if (savedData.property_name) {
+        document.getElementById('property_name').value = savedData.property_name;
+    }
+    if (savedData.property_address) {
+        document.getElementById('property_address').value = savedData.property_address;
+    }
+    if (savedData.zip_code) {
+        document.getElementById('zip_code').value = savedData.zip_code;
+    }
+    if (savedData.university) {
+        document.getElementById('university').value = savedData.university;
+    }
+    if (savedData.client_risk) {
+        document.getElementById('client_risk').value = savedData.client_risk;
+    }
+    if (savedData.show_parameters !== undefined) {
+        document.getElementById('show_parameters').checked = savedData.show_parameters;
+    }
+    
+    // Restore file upload indicators and remove 'required' from file inputs
+    // since we'll be using the saved files from the server
+    if (savedData.cash_forecast_filename) {
+        const zone = document.getElementById('cash_forecast_zone');
+        const input = document.getElementById('cash_forecast');
+        zone.classList.add('has-file');
+        zone.querySelector('p').textContent = '✓ ' + savedData.cash_forecast_filename + ' (from previous analysis)';
+        input.removeAttribute('required'); // Remove HTML5 validation
+    }
+    if (savedData.income_statement_filename) {
+        const zone = document.getElementById('income_statement_zone');
+        const input = document.getElementById('income_statement');
+        zone.classList.add('has-file');
+        zone.querySelector('p').textContent = '✓ ' + savedData.income_statement_filename + ' (from previous analysis)';
+        input.removeAttribute('required'); // Remove HTML5 validation
+    }
+    if (savedData.balance_sheet_filename) {
+        const zone = document.getElementById('balance_sheet_zone');
+        const input = document.getElementById('balance_sheet');
+        zone.classList.add('has-file');
+        zone.querySelector('p').textContent = '✓ ' + savedData.balance_sheet_filename + ' (from previous analysis)';
+        input.removeAttribute('required'); // Remove HTML5 validation
+    }
+}
+
 // Helper function to clear all file inputs
 function clearAllFileInputs() {
     const fileInputs = ['cash_forecast', 'income_statement', 'balance_sheet'];
@@ -403,6 +463,7 @@ function clearAllFileInputs() {
         const fileInput = document.getElementById(fileId);
         if (fileInput) {
             fileInput.value = '';
+            fileInput.setAttribute('required', 'required'); // Re-add required attribute for fresh uploads
         }
         
         // Reset the drop zone visual state
@@ -520,58 +581,114 @@ function validateFile(fileId, filename) {
 document.getElementById('analysisForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     
-    // Validate all files before submission
+    console.log('=== FORM SUBMIT HANDLER TRIGGERED ===');
+    console.log('savedData available:', savedData);
+    
+    // Check if we're using saved files or new uploads
     const cashForecastFile = document.getElementById('cash_forecast').files[0];
     const incomeStatementFile = document.getElementById('income_statement').files[0];
     const balanceSheetFile = document.getElementById('balance_sheet').files[0];
     
+    console.log('File inputs:', {
+        cashForecast: cashForecastFile ? cashForecastFile.name : 'none',
+        incomeStatement: incomeStatementFile ? incomeStatementFile.name : 'none',
+        balanceSheet: balanceSheetFile ? balanceSheetFile.name : 'none'
+    });
+    
+    const hasNewFiles = cashForecastFile || incomeStatementFile || balanceSheetFile;
+    const useSavedFiles = savedData && !hasNewFiles;
+    
+    console.log('hasNewFiles:', hasNewFiles);
+    console.log('useSavedFiles:', useSavedFiles);
+    
     let hasErrors = false;
     
-    if (!cashForecastFile || !validateFile('cash_forecast', cashForecastFile.name)) {
-        hasErrors = true;
-    }
-    
-    if (!incomeStatementFile || !validateFile('income_statement', incomeStatementFile.name)) {
-        hasErrors = true;
-    }
-    
-    if (!balanceSheetFile || !validateFile('balance_sheet', balanceSheetFile.name)) {
-        hasErrors = true;
-    }
-    
-    if (hasErrors) {
-        showError('Please ensure all files have the correct names before submitting.');
+    // Only validate files if new ones were uploaded
+    if (hasNewFiles) {
+        console.log('Validating new files...');
+        if (!cashForecastFile || !validateFile('cash_forecast', cashForecastFile.name)) {
+            hasErrors = true;
+        }
+        
+        if (!incomeStatementFile || !validateFile('income_statement', incomeStatementFile.name)) {
+            hasErrors = true;
+        }
+        
+        if (!balanceSheetFile || !validateFile('balance_sheet', balanceSheetFile.name)) {
+            hasErrors = true;
+        }
+        
+        if (hasErrors) {
+            console.error('File validation failed');
+            showError('Please ensure all files have the correct names before submitting.');
+            return;
+        }
+    } else if (!useSavedFiles) {
+        // No new files and no saved files - error
+        console.error('No files available - not using saved files and no new uploads');
+        showError('Please upload all required files.');
         return;
     }
     
+    console.log('Creating FormData...');
     const formData = new FormData(e.target);
     
+    // Add flag to indicate using saved files
+    if (useSavedFiles) {
+        formData.append('use_saved_files', 'true');
+        console.log('Using saved files from previous analysis');
+        
+        // When using saved files, create dummy file objects to satisfy backend validation
+        // The backend will ignore these and use the saved file paths instead
+        const dummyFile = new File([''], 'dummy.txt', { type: 'text/plain' });
+        formData.set('cash_forecast', dummyFile);
+        formData.set('income_statement', dummyFile);
+        formData.set('balance_sheet', dummyFile);
+    }
+    
+    console.log('Submitting form with data:', {
+        property_name: formData.get('property_name'),
+        client_risk: formData.get('client_risk'),
+        use_saved_files: formData.get('use_saved_files'),
+        zip_code: formData.get('zip_code'),
+        university: formData.get('university')
+    });
+    
     // Show loading, hide form
+    console.log('Showing loading screen...');
     document.getElementById('upload-form').style.display = 'none';
     document.getElementById('loading').classList.add('active');
     
     try {
+        console.log('Sending fetch request to /api/analyze...');
         const response = await fetch('/api/analyze', {
             method: 'POST',
             body: formData
         });
         
+        console.log('Response status:', response.status);
+        
         if (response.ok) {
+            console.log('Response OK, rendering HTML...');
             // The endpoint returns HTML, so display it
             const html = await response.text();
             document.open();
             document.write(html);
             document.close();
         } else {
+            console.error('Response not OK:', response.status);
             // Try to parse error as JSON
             try {
                 const result = await response.json();
+                console.error('Error response:', result);
                 showError(result.error || 'An error occurred during analysis');
-            } catch {
+            } catch (parseError) {
+                console.error('Failed to parse error response:', parseError);
                 showError('An error occurred during analysis');
             }
         }
     } catch (error) {
+        console.error('Network error during form submission:', error);
         showError('Network error: ' + error.message);
     }
 });
@@ -607,7 +724,7 @@ function displayResults(result) {
         </div>
         
         <p style="margin-top: 30px;">
-            <a href="/" class="btn" style="display: inline-block; text-decoration: none;">Analyze Another Property</a>
+            <a href="/?restore=1" class="btn" style="display: inline-block; text-decoration: none;">Analyze Another Property</a>
         </p>
     `;
     

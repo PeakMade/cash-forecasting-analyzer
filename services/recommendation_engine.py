@@ -644,10 +644,29 @@ class RecommendationEngine:
                     # Maximum safe distribution: current cash - required reserves
                     max_safe_distribution = cash_balance - required_reserve
                     
-                    # Conservative recommendation: lesser of
-                    # - 50% of projected 6-month FCF (more conservative than 70%)
-                    # - Available cash after maintaining required reserve
-                    safe_distribution = min(total_fcf * 0.5, max_safe_distribution)
+                    # Conservative recommendation based on risk tolerance:
+                    # - Low risk: 70% of projected FCF (more aggressive distribution)
+                    # - Medium risk: 50% of projected FCF (moderate)
+                    # - High risk: 40% of projected FCF (conservative)
+                    # But never exceed available cash after maintaining required reserves
+                    
+                    risk_months = self.decision_thresholds['cash_reserve_months']
+                    if risk_months <= 2:
+                        # Low risk
+                        fcf_percentage = 0.70
+                    elif risk_months <= 4:
+                        # Medium-low risk
+                        fcf_percentage = 0.60
+                    elif risk_months <= 6:
+                        # Medium-high risk
+                        fcf_percentage = 0.50
+                    else:
+                        # High risk
+                        fcf_percentage = 0.40
+                    
+                    safe_distribution = min(total_fcf * fcf_percentage, max_safe_distribution)
+                    
+                    print(f"DEBUG: Risk-adjusted distribution - risk_months: {risk_months}, fcf_percentage: {fcf_percentage:.0%}, fcf_component: ${total_fcf * fcf_percentage:,.2f}")
                     
                     # Verify reserves will be adequate after distribution
                     balance_data_dict = {

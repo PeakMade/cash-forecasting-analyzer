@@ -625,7 +625,28 @@ def index():
     model_name = os.environ.get('OPENAI_MODEL', 'gpt-4o')
     data_source = os.environ.get('PROPERTY_DATA_SOURCE', 'database')
     print(f"DEBUG: model_name={model_name}, data_source={data_source}")
-    return render_template('index.html', model_name=model_name, data_source=data_source)
+    
+    # Only restore saved form data if coming from "Analyze Another Property" button
+    # This prevents auto-filling on fresh page loads/new sessions
+    restore_data = request.args.get('restore') == '1'
+    saved_data = None
+    
+    if restore_data:
+        saved_data = session.get('last_analysis_data')
+        if saved_data:
+            print(f"=== RESTORING SAVED ANALYSIS DATA: Property {saved_data.get('property_name')} ===")
+        else:
+            print("=== RESTORE REQUESTED BUT NO SAVED DATA FOUND ===")
+    else:
+        # Clear saved data on fresh page load to avoid stale data
+        if 'last_analysis_data' in session:
+            print("=== CLEARING SAVED ANALYSIS DATA (fresh page load) ===")
+            session.pop('last_analysis_data', None)
+    
+    return render_template('index.html', 
+                         model_name=model_name, 
+                         data_source=data_source,
+                         saved_data=saved_data)
 
 @app.route('/upload', methods=['POST'])
 @login_required
@@ -740,18 +761,56 @@ def analyze_files():
     Requires: cash_forecast (Excel), income_statement (PDF), balance_sheet (PDF)
     """
     try:
-        # Validate files
-        required_files = ['cash_forecast', 'income_statement', 'balance_sheet']
-        for file_key in required_files:
-            if file_key not in request.files:
-                return jsonify({'error': f'{file_key} file is required'}), 400
-            if request.files[file_key].filename == '':
-                return jsonify({'error': f'Please select a {file_key} file'}), 400
+        # Check if we have saved files from a previous analysis
+        saved_analysis = session.get('last_analysis_data')
+        use_saved_files = request.form.get('use_saved_files') == 'true'
         
-        # Get files
-        cash_forecast = request.files['cash_forecast']
-        income_statement = request.files['income_statement']
-        balance_sheet = request.files['balance_sheet']
+        print(f"=== ANALYZE FILES CALLED ===")
+        print(f"=== use_saved_files flag: {use_saved_files} ===")
+        print(f"=== saved_analysis exists: {saved_analysis is not None} ===")
+        if saved_analysis:
+            print(f"=== saved files: {saved_analysis.get('cash_forecast_filename')}, {saved_analysis.get('income_statement_filename')}, {saved_analysis.get('balance_sheet_filename')} ===")
+        
+        # Validate files - either new uploads or use saved files
+        required_files = ['cash_forecast', 'income_statement', 'balance_sheet']
+        
+        # Check if user uploaded new files or if we should use saved ones
+        files_uploaded = all(
+            file_key in request.files and request.files[file_key].filename != '' and request.files[file_key].filename != 'dummy.txt'
+            for file_key in required_files
+        )
+        
+        print(f"=== files_uploaded: {files_uploaded} ===")
+        print(f"=== File names in request: {[request.files[k].filename if k in request.files else 'N/A' for k in required_files]} ===")
+        
+        if not files_uploaded and not (use_saved_files and saved_analysis):
+            print("=== ERROR: No files uploaded and no saved files available ===")
+            return jsonify({'error': 'All three files are required'}), 400
+        
+        # Determine which files to use
+        if files_uploaded and not use_saved_files:
+            # New files uploaded
+            print("=== USING NEW FILES ===")
+            cash_forecast = request.files['cash_forecast']
+            income_statement = request.files['income_statement']
+            balance_sheet = request.files['balance_sheet']
+            using_saved_files = False
+        else:
+            # Use saved files from previous analysis
+            print("=== USING SAVED FILES FROM PREVIOUS ANALYSIS ===")
+            if not saved_analysis:
+                print("=== ERROR: No saved analysis data found ===")
+                return jsonify({'error': 'No saved files available. Please upload files.'}), 400
+            
+            # Create dummy file objects with saved filenames for logging
+            class SavedFile:
+                def __init__(self, filename):
+                    self.filename = filename
+            
+            cash_forecast = SavedFile(saved_analysis['cash_forecast_filename'])
+            income_statement = SavedFile(saved_analysis['income_statement_filename'])
+            balance_sheet = SavedFile(saved_analysis['balance_sheet_filename'])
+            using_saved_files = True
         
         # Validate property information
         property_entity = request.form.get('property_name', '').strip()
@@ -794,26 +853,36 @@ def analyze_files():
             balance_sheet.filename
         ])
         
-        # Validate file types
-        if not cash_forecast.filename.endswith(('.xlsx', '.xls')):
-            return jsonify({'error': 'Cash forecast must be an Excel file (.xlsx or .xls)'}), 400
+        # Validate file types (only if new files uploaded)
+        if not using_saved_files:
+            if not cash_forecast.filename.endswith(('.xlsx', '.xls')):
+                return jsonify({'error': 'Cash forecast must be an Excel file (.xlsx or .xls)'}), 400
+            
+            if not income_statement.filename.endswith('.pdf') or not balance_sheet.filename.endswith('.pdf'):
+                return jsonify({'error': 'Income statement and balance sheet must be PDF files'}), 400
         
-        if not income_statement.filename.endswith('.pdf') or not balance_sheet.filename.endswith('.pdf'):
-            return jsonify({'error': 'Income statement and balance sheet must be PDF files'}), 400
-        
-        # Create unique session folder
-        analysis_id = str(uuid.uuid4())
-        session_folder = os.path.join(app.config['UPLOAD_FOLDER'], analysis_id)
-        os.makedirs(session_folder, exist_ok=True)
-        
-        # Save files
-        cash_forecast_path = os.path.join(session_folder, secure_filename(cash_forecast.filename))
-        income_statement_path = os.path.join(session_folder, secure_filename(income_statement.filename))
-        balance_sheet_path = os.path.join(session_folder, secure_filename(balance_sheet.filename))
-        
-        cash_forecast.save(cash_forecast_path)
-        income_statement.save(income_statement_path)
-        balance_sheet.save(balance_sheet_path)
+        # Handle file paths
+        if using_saved_files:
+            # Use saved file paths from previous analysis
+            cash_forecast_path = saved_analysis['cash_forecast_path']
+            income_statement_path = saved_analysis['income_statement_path']
+            balance_sheet_path = saved_analysis['balance_sheet_path']
+            session_folder = saved_analysis['session_folder']
+            print(f"=== REUSING FILES FROM SESSION FOLDER: {session_folder} ===")
+        else:
+            # Create unique session folder and save new files
+            analysis_id = str(uuid.uuid4())
+            session_folder = os.path.join(app.config['UPLOAD_FOLDER'], analysis_id)
+            os.makedirs(session_folder, exist_ok=True)
+            
+            # Save files
+            cash_forecast_path = os.path.join(session_folder, secure_filename(cash_forecast.filename))
+            income_statement_path = os.path.join(session_folder, secure_filename(income_statement.filename))
+            balance_sheet_path = os.path.join(session_folder, secure_filename(balance_sheet.filename))
+            
+            cash_forecast.save(cash_forecast_path)
+            income_statement.save(income_statement_path)
+            balance_sheet.save(balance_sheet_path)
         
         # Get property details from SharePoint
         from services.data_source_factory import get_property_data_source
@@ -914,6 +983,23 @@ def analyze_files():
             )
         except Exception as log_error:
             app.logger.error(f"Failed to log successful analysis: {str(log_error)}")
+        
+        # Store form data in session for re-use when "Analyze Another Property" is clicked
+        session['last_analysis_data'] = {
+            'property_name': property_entity,
+            'property_address': property_address,
+            'zip_code': zip_code,
+            'university': university,
+            'client_risk': client_risk,
+            'show_parameters': show_parameters,
+            'cash_forecast_filename': cash_forecast.filename,
+            'income_statement_filename': income_statement.filename,
+            'balance_sheet_filename': balance_sheet.filename,
+            'cash_forecast_path': cash_forecast_path,
+            'income_statement_path': income_statement_path,
+            'balance_sheet_path': balance_sheet_path,
+            'session_folder': session_folder
+        }
         
         # Render results page
         return render_template('results.html', 
