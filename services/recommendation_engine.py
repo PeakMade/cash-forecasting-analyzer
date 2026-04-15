@@ -385,8 +385,15 @@ class RecommendationEngine:
         distribution_eligible = adjusted_all_positive or allow_one_negative
         effective_lowest = 0 if allow_one_negative else adjusted_lowest_month_fcf
         
+        # Calculate minimum projected ending balance for distribution safety
+        # This is critical - we should distribute based on the LOWEST projected cash position
+        # over the next 6 months, not just current balance
+        min_projected_balance = min(fcf_values) if fcf_values else 0
+        max_projected_balance = max(fcf_values) if fcf_values else 0
+        
         print(f"DEBUG: Adjusted avg FCF (excluding reserves): ${adjusted_avg_fcf:,.2f}")
         print(f"DEBUG: Adjusted all_positive: {adjusted_all_positive}, allow_one_negative: {allow_one_negative}, distribution_eligible: {distribution_eligible}")
+        print(f"DEBUG: Min projected ending balance: ${min_projected_balance:,.2f}, Max: ${max_projected_balance:,.2f}")
         
         return {
             'total_fcf': total_fcf,
@@ -403,7 +410,9 @@ class RecommendationEngine:
             'trend': trend,
             'all_positive': negative_months == 0,
             'months_analyzed': len(projected_months),
-            'total_reserves': total_reserves  # Voluntary reserve allocations
+            'total_reserves': total_reserves,  # Voluntary reserve allocations
+            'min_projected_balance': min_projected_balance,  # NEW: Lowest ending balance projection
+            'max_projected_balance': max_projected_balance  # NEW: Highest ending balance projection
         }
     
     def _calculate_reserves_after_distribution(self, balance_data: Dict, distribution_amount: float) -> float:
@@ -628,7 +637,8 @@ class RecommendationEngine:
                     print(f"DEBUG: Distribution criteria MET - proceeding to calculate safe amount")
                     
                     # Calculate safe distribution:
-                    # Keep enough cash to maintain minimum reserve_months of reserves AFTER distribution
+                    # Use the MINIMUM PROJECTED ENDING BALANCE over next 6 months as base
+                    # This is more accurate than current balance - we distribute based on forward position
                     
                     # Calculate monthly operating needs
                     if monthly_debt_service > 0:
@@ -641,8 +651,15 @@ class RecommendationEngine:
                     # Required reserve: use dynamic threshold from user selection
                     required_reserve = monthly_operating_needs * self.decision_thresholds['cash_reserve_months']
                     
-                    # Maximum safe distribution: current cash - required reserves
-                    max_safe_distribution = cash_balance - required_reserve
+                    # Maximum safe distribution: use minimum projected balance (not current balance)
+                    # This way we distribute based on the worst-case projected position
+                    min_projected_balance = multi_month_analysis.get('min_projected_balance', cash_balance)
+                    
+                    # If projection available, use it; otherwise fall back to current balance
+                    distribution_base = min_projected_balance if min_projected_balance > 0 else cash_balance
+                    max_safe_distribution = distribution_base - required_reserve
+                    
+                    print(f"DEBUG: Using projected balance for distribution: min_balance=${distribution_base:,.2f} (vs current=${cash_balance:,.2f})")
                     
                     # Conservative recommendation based on risk tolerance:
                     # - Low risk: 70% of projected FCF (more aggressive distribution)
@@ -664,14 +681,17 @@ class RecommendationEngine:
                         # High risk
                         fcf_percentage = 0.40
                     
-                    safe_distribution = min(total_fcf * fcf_percentage, max_safe_distribution)
+                    # Apply risk percentage to max_safe_distribution (based on projected balance)
+                    # not to total_fcf (which is sum of monthly deltas)
+                    safe_distribution = max_safe_distribution * fcf_percentage
                     
-                    print(f"DEBUG: Risk-adjusted distribution - risk_months: {risk_months}, fcf_percentage: {fcf_percentage:.0%}, fcf_component: ${total_fcf * fcf_percentage:,.2f}")
+                    print(f"DEBUG: Risk-adjusted distribution - risk_months: {risk_months}, fcf_percentage: {fcf_percentage:.0%}, max_safe: ${max_safe_distribution:,.2f}, recommended: ${safe_distribution:,.2f}")
                     
                     # Verify reserves will be adequate after distribution
+                    # Use the minimum projected balance as the base for reserve calculation
                     balance_data_dict = {
                         'months_of_reserves': months_of_reserves,
-                        'cash_balance': cash_balance,
+                        'cash_balance': distribution_base,  # Use projected minimum, not current
                         'monthly_debt_service': monthly_debt_service,
                         'current_liabilities': current_liabilities
                     }
@@ -679,6 +699,7 @@ class RecommendationEngine:
                     
                     print(f"DEBUG: Distribution calculation - safe_distribution: ${safe_distribution:,.2f}, reserves_after: {reserves_after:.1f}mo, required: {self.decision_thresholds['cash_reserve_months']}mo")
                     print(f"DEBUG: Components - total_fcf: ${total_fcf:,.2f}, max_safe: ${max_safe_distribution:,.2f}, required_reserve: ${required_reserve:,.2f}")
+                    print(f"DEBUG: Distribution base used: ${distribution_base:,.2f} (min projected vs ${cash_balance:,.2f} current)")
                     
                     if safe_distribution > 50000 and reserves_after >= self.decision_thresholds['cash_reserve_months']:
                         return ('DISTRIBUTE', safe_distribution, None)
