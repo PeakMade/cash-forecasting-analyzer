@@ -971,6 +971,18 @@ def analyze_files():
             user = get_user()
             app_token = azure_auth.get_app_only_token()
             db_log = get_property_data_source(access_token=access_token, app_only_token=app_token)
+            
+            # Extract recommendation details for Status columns
+            recommendation = result.get('recommendation', {})
+            decision = recommendation.get('decision', 'UNKNOWN')
+            amount = recommendation.get('amount', 0)
+            
+            # Format decision for display (capitalize first letter of each word)
+            status_display = decision.replace('_', ' ').title()
+            
+            # Format amount as currency
+            status_reason_display = f"${amount:,.2f}" if amount else "$0.00"
+            
             db_log.log_activity(
                 user_email=user.get('email', 'unknown'),
                 user_name=user.get('name', 'Unknown User'),
@@ -979,7 +991,9 @@ def analyze_files():
                 file_names=uploaded_filenames,
                 application=get_application_name(),
                 environment=get_environment_name(),
-                session_id=get_session_id()
+                session_id=get_session_id(),
+                status=status_display,
+                status_reason=status_reason_display
             )
         except Exception as log_error:
             app.logger.error(f"Failed to log successful analysis: {str(log_error)}")

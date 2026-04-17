@@ -325,7 +325,8 @@ class SharePointDataSource:
     
     def _log_via_graph(self, user_email: str, user_name: str, activity_type: str,
                       property_name: Optional[str], file_names: Optional[str],
-                      application: str, environment: str, session_id: Optional[str]) -> bool:
+                      application: str, environment: str, session_id: Optional[str],
+                      status: Optional[str] = None, status_reason: Optional[str] = None) -> bool:
         """
         Log activity to SharePoint via Microsoft Graph API (app-only)
         This is more reliable than SharePoint REST API
@@ -339,6 +340,8 @@ class SharePointDataSource:
             application: Application name
             environment: Environment name
             session_id: Session ID
+            status: Optional recommendation status
+            status_reason: Optional recommendation amount
             
         Returns:
             True if logging successful, False otherwise
@@ -380,6 +383,10 @@ class SharePointDataSource:
                 log_entry['fields']['PropertyName'] = property_name
             if file_names:
                 log_entry['fields']['FileNames'] = file_names
+            if status:
+                log_entry['fields']['Status'] = status
+            if status_reason:
+                log_entry['fields']['StatusReason'] = status_reason
             
             # Post to Graph API
             graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items"
@@ -424,7 +431,7 @@ class SharePointDataSource:
     def log_activity(self, user_email: str, user_name: str, activity_type: str, 
                     property_name: str = None, file_names: str = None, 
                     application: str = 'CashForecastAnalyzer', environment: str = 'Prod',
-                    session_id: str = None) -> bool:
+                    session_id: str = None, status: str = None, status_reason: str = None) -> bool:
         """
         Log user activity to Innovation Use Log SharePoint list
         Uses Microsoft Graph API with app-only token (more reliable than SharePoint REST)
@@ -438,6 +445,8 @@ class SharePointDataSource:
             application: Application name (default: 'CashForecastAnalyzer')
             environment: Environment name (default: 'Prod', use 'Local' for local development)
             session_id: Session ID for tracking activities within the same session
+            status: Optional recommendation status (e.g., 'Distribute', 'Contribute', 'Do Nothing')
+            status_reason: Optional recommendation amount (e.g., '$500,000.00' or '$0.00')
             
         Returns:
             True if logging successful, False otherwise
@@ -462,7 +471,9 @@ class SharePointDataSource:
             file_names=file_names,
             application=application,
             environment=environment,
-            session_id=session_id
+            session_id=session_id,
+            status=status,
+            status_reason=status_reason
         )
     
     def test_connection(self) -> bool:
