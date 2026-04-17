@@ -980,8 +980,10 @@ def analyze_files():
             # Format decision for display (capitalize first letter of each word)
             status_display = decision.replace('_', ' ').title()
             
-            # Format amount as currency
-            status_reason_display = f"${amount:,.2f}" if amount else "$0.00"
+            # Format amount as currency with risk level
+            risk_display = client_risk.title() if client_risk else 'Unknown'
+            amount_display = f"${amount:,.2f}" if amount else "$0.00"
+            status_reason_display = f"{risk_display} Risk Chosen - {amount_display}"
             
             db_log.log_activity(
                 user_email=user.get('email', 'unknown'),
