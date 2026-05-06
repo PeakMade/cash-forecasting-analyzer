@@ -1,4 +1,52 @@
+---
+title: Session Management Guide
+description: Custom logical session ID pattern for Flask applications
+tags: [session, flask, authentication, tracking, logging, uuid, best-practices]
+category: Architecture
+audience: developers
+last_updated: 2026-05-04
+---
+
 # Session Management Guide
+
+## Quick Reference
+
+### Core Function
+```python
+def get_session_id():
+    """Get or generate logical session ID for activity tracking"""
+    import uuid
+    if 'logical_session_id' not in session:
+        session['logical_session_id'] = str(uuid.uuid4())
+        print(f"=== GENERATED NEW SESSION ID: {session['logical_session_id']} ===")
+    else:
+        print(f"=== USING EXISTING SESSION ID: {session['logical_session_id']} ===")
+    return session['logical_session_id']
+```
+
+### Usage in Routes
+```python
+@app.route('/analyze')
+def analyze():
+    session_id = get_session_id()  # Always use this helper
+    logger.info(f"Session {session_id}: Processing request")
+    # ... your logic
+```
+
+### Key Principles
+- ✅ **Always use** `get_session_id()` - Never access session directly
+- ✅ **Log consistently** - Include session ID in all log messages
+- ✅ **Return in errors** - Include session ID in error responses for debugging
+- ✅ **Regenerate on major changes** - New workflow = new session ID
+- ❌ **Never expose in URLs** - Keep session IDs server-side only
+
+### When to Regenerate
+- User explicitly restarts workflow: `session['logical_session_id'] = str(uuid.uuid4())`
+- Session timeout detected (e.g., 1+ hour inactivity)
+- User completes major workflow and starts new one
+- Security event or suspicious activity
+
+---
 
 ## Overview
 
@@ -326,6 +374,22 @@ If you're adopting this pattern in an existing application:
 - **Clear session on logout** - Prevent session hijacking
 - **Don't log sensitive data** - Session IDs are safe, but avoid logging tokens or passwords
 
+## Implementation Location
+
+### Current Project Files
+- **Core Implementation**: [app.py](app.py) - Lines ~103-113 (`get_session_id()` function)
+- **Usage Examples**: Search for `get_session_id()` calls throughout [app.py](app.py)
+- **Session Config**: [app.py](app.py) - Flask session configuration near top of file
+
+### Quick Search
+```bash
+# Find all uses of session ID
+grep -r "get_session_id" .
+
+# Find session logging patterns
+grep -r "SESSION.*:" .
+```
+
 ## Summary
 
 This custom logical session ID pattern provides:
@@ -340,3 +404,9 @@ By using this consistent approach across all team projects, we ensure:
 - Standardized logging and monitoring
 - Better collaboration and code sharing
 - Reduced learning curve for new team members
+
+## For Copilot Agents
+
+**Keywords**: session management, logical session ID, Flask session, UUID tracking, user activity logging, session lifecycle, session regeneration, debugging sessions, session-based caching, workflow tracking
+
+**Related Concepts**: Flask session storage, session cookies, activity logging, session timeout, session security, multi-step workflows, session-scoped file management

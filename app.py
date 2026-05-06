@@ -60,7 +60,7 @@ from services.file_processor import FileProcessor
 from services.analysis_engine import AnalysisEngine
 from services.summary_generator import SummaryGenerator
 from services.docx_generator import WordDocumentGenerator
-from services.auth import AzureADAuth, login_required, get_user
+from services.auth import AzureADAuth, login_required, get_user, group_required
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -185,10 +185,40 @@ def auth_callback():
     session['refresh_token'] = result.get('refresh_token')
     session['authenticated'] = True
     
-    # Store SharePoint token from initial login (both scopes requested at once)
-    if 'access_token' in result:
-        session['sharepoint_access_token'] = result['access_token']
-        print(f"### SharePoint token stored from initial login (length: {len(result['access_token'])})")
+    # Fetch and store user's group memberships for authorization
+    # Use the access token we just acquired (includes Graph API scopes)
+    try:
+        # Import the helper function directly
+        from services.auth import fetch_user_groups
+        
+        # Use the access_token from the login result (includes Graph API permissions)
+        access_token = result.get('access_token')
+        if access_token:
+            user_groups = fetch_user_groups(access_token)
+            session['user_groups'] = user_groups
+            print(f"=== USER GROUPS FETCHED: {len(user_groups)} groups ===")
+            
+            # Check if user is in authorized group
+            authorized_group_id = os.environ.get('AUTHORIZED_GROUP_ID')
+            if authorized_group_id:
+                is_authorized = authorized_group_id in user_groups
+                print(f"=== USER AUTHORIZATION CHECK: {is_authorized} ===")
+                if not is_authorized:
+                    print(f"=== WARNING: User {session['user']['email']} not in authorized group ===")
+            else:
+                print("=== INFO: No AUTHORIZED_GROUP_ID configured - group check disabled ===")
+        else:
+            print("=== WARNING: No access token in result ===")
+            session['user_groups'] = []
+    except Exception as e:
+        print(f"=== WARNING: Could not fetch user groups: {str(e)} ===")
+        import traceback
+        traceback.print_exc()
+        session['user_groups'] = []  # Fail safe with empty list
+    
+    # Note: Initial login only provides Graph API token (for group membership)
+    # SharePoint access requires separate consent via /auth/sharepoint-consent
+    # Don't store SharePoint token here - it won't be in the initial login result
     
     # Log session start (initial login)
     try:
@@ -227,7 +257,7 @@ def auth_callback():
     return redirect(url_for('index'))
 
 @app.route('/auth/sharepoint-consent')
-@login_required
+@group_required
 def sharepoint_consent():
     """Initiate SharePoint consent flow"""
     print("=== INITIATING SHAREPOINT CONSENT FLOW ===")
@@ -552,7 +582,7 @@ def health_check():
     return html
 
 @app.route('/')
-@login_required
+@group_required
 def index():
     """Main page with file upload form"""
     print("=== INDEX ROUTE V4 - LOGIN NOW LOGS SESSION_START ===")
@@ -649,7 +679,7 @@ def index():
                          saved_data=saved_data)
 
 @app.route('/upload', methods=['POST'])
-@login_required
+@group_required
 def upload_files():
     """Handle file uploads and property information"""
     try:
@@ -737,14 +767,14 @@ def upload_files():
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/analysis/<analysis_id>')
-@login_required
+@group_required
 def view_analysis(analysis_id):
     """View detailed analysis results"""
     # TODO: Retrieve stored analysis results
     return render_template('analysis.html', analysis_id=analysis_id)
 
 @app.route('/api/drill-down/<analysis_id>/<bullet_id>')
-@login_required
+@group_required
 def get_drill_down(analysis_id, bullet_id):
     """Get detailed information for a specific bullet point"""
     # TODO: Retrieve detailed drill-down data
@@ -754,7 +784,7 @@ def get_drill_down(analysis_id, bullet_id):
     })
 
 @app.route('/api/analyze', methods=['POST'])
-@login_required
+@group_required
 def analyze_files():
     """
     Process uploaded files and generate comprehensive recommendation
@@ -1061,7 +1091,7 @@ def analyze_files():
         return jsonify({'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/download-docx')
-@login_required
+@group_required
 def download_docx():
     """Download the generated Word document"""
     try:
@@ -1082,7 +1112,7 @@ def download_docx():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/test-db')
-@login_required
+@group_required
 def test_database():
     """Test database connection and query"""
     try:
@@ -1109,7 +1139,7 @@ def test_database():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/properties')
-@login_required
+@group_required
 def get_properties():
     """Get list of all reportable properties for dropdown"""
     try:
@@ -1157,7 +1187,7 @@ def get_properties():
         }), 500
 
 @app.route('/api/property/<entity_number>')
-@login_required
+@group_required
 def get_property_details(entity_number):
     """Get detailed property information by entity number"""
     try:
@@ -1177,6 +1207,27 @@ def get_property_details(entity_number):
         print(f"=== ERROR FETCHING PROPERTY: {str(e)} ===")
         app.logger.error(f"Error fetching property details: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/auth')
+@login_required
+def debug_auth():
+    """Debug route to check authentication and group membership"""
+    from services.auth import check_group_membership
+    
+    authorized_group_id = os.environ.get('AUTHORIZED_GROUP_ID')
+    user_groups = session.get('user_groups', [])
+    is_authorized = check_group_membership()
+    
+    return jsonify({
+        'user': session.get('user', {}),
+        'authenticated': session.get('authenticated', False),
+        'user_groups': user_groups,
+        'user_groups_count': len(user_groups),
+        'configured_group_id': authorized_group_id,
+        'is_in_authorized_group': authorized_group_id in user_groups if authorized_group_id else None,
+        'check_group_membership_result': is_authorized,
+        'account': session.get('account', {})
+    })
 
 if __name__ == '__main__':
     # Use use_reloader=False to avoid file watcher issues on Windows

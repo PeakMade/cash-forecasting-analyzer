@@ -6,7 +6,7 @@ Handles user authentication via Microsoft identity platform
 import os
 import logging
 from functools import wraps
-from flask import redirect, url_for, session, request
+from flask import redirect, url_for, session, request, render_template_string
 import msal
 
 logger = logging.getLogger(__name__)
@@ -31,10 +31,20 @@ class AzureADAuth:
         self.redirect_uri = os.environ.get('AZURE_AD_REDIRECT_URI', 
                                           'http://localhost:5000/auth/callback')
         
-        # Use .default scope to get all configured API permissions in one token
-        # This includes both Graph API (User.Read) and SharePoint access
-        # configured in Azure AD app registration
-        self.scopes = ["https://peakcampus.sharepoint.com/.default"]
+        # Request Graph API scopes during initial login for group membership checking
+        # SharePoint access will be requested separately via consent flow
+        # Note: offline_access, openid, profile are automatically added by MSAL
+        self.scopes = [
+            "User.Read",                # Graph: Read user profile
+            "GroupMember.Read.All"      # Graph: Read group memberships
+        ]
+        
+        # SharePoint-specific scopes (used in separate consent flow)
+        self.sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
+        
+        # Graph API scopes for user profile and group membership
+        self.graph_scopes = ["User.Read", "GroupMember.Read.All"]
+        
         self.sharepoint_url = os.environ.get('SHAREPOINT_SITE_URL', 'https://peakcampus.sharepoint.com/sites/BaseCampApps')
     
     def get_msal_app(self, cache=None):
@@ -82,10 +92,9 @@ class AzureADAuth:
             Authorization URL for SharePoint consent
         """
         msal_app = self.get_msal_app()
-        sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
         
         auth_url = msal_app.get_authorization_request_url(
-            scopes=sharepoint_scopes,
+            scopes=self.sharepoint_scopes,
             redirect_uri=self.redirect_uri
         )
         
@@ -107,11 +116,10 @@ class AzureADAuth:
             cache.deserialize(session['token_cache'])
             
         msal_app = self.get_msal_app(cache=cache)
-        sharepoint_scopes = ["https://peakcampus.sharepoint.com/.default"]
         
         result = msal_app.acquire_token_by_authorization_code(
             code,
-            scopes=sharepoint_scopes,
+            scopes=self.sharepoint_scopes,
             redirect_uri=self.redirect_uri
         )
         
@@ -253,7 +261,7 @@ class AzureADAuth:
         
         # Try MSAL's built-in silent token acquisition (uses cache + refresh token)
         msal_app = self.get_msal_app()
-        result = msal_app.acquire_token_silent(scopes=self.scopes, account=account)
+        result = msal_app.acquire_token_silent(scopes=self.sharepoint_scopes, account=account)
         
         # If MSAL returned a new token, store it
         if result and "access_token" in result:
@@ -269,7 +277,7 @@ class AzureADAuth:
                 try:
                     result = msal_app.acquire_token_by_refresh_token(
                         refresh_token,
-                        scopes=self.scopes
+                        scopes=self.sharepoint_scopes
                     )
                     if result and "access_token" in result:
                         session['sharepoint_access_token'] = result['access_token']
@@ -280,6 +288,39 @@ class AzureADAuth:
                     pass  # If refresh fails, return existing token
         
         return sharepoint_token
+
+
+    def get_user_groups(self):
+        """
+        Get current user's group memberships using Microsoft Graph API
+        Requires User.Read.All or GroupMember.Read.All delegated permission
+        
+        Returns:
+            list: List of group object IDs, or empty list on failure
+        """
+        try:
+            account = session.get('account')
+            if not account:
+                logger.warning("No account in session - cannot fetch groups")
+                return []
+            
+            # Get Graph API token with appropriate scopes
+            msal_app = self.get_msal_app()
+            result = msal_app.acquire_token_silent(
+                scopes=["User.Read", "GroupMember.Read.All"],
+                account=account
+            )
+            
+            if not result or "access_token" not in result:
+                logger.warning("Could not acquire Graph token for group lookup")
+                return []
+            
+            # Fetch groups from Microsoft Graph
+            return fetch_user_groups(result["access_token"])
+            
+        except Exception as e:
+            logger.error(f"Error getting user groups: {str(e)}")
+            return []
 
 
 def login_required(f):
@@ -310,3 +351,152 @@ def get_user():
         User dict with name, email, etc. or None
     """
     return session.get('user')
+
+
+def check_group_membership(group_id=None):
+    """
+    Check if current user is a member of specified group
+    
+    Args:
+        group_id: Azure AD group object ID. If None, uses AUTHORIZED_GROUP_ID from env
+    
+    Returns:
+        bool: True if user is in the group, False otherwise
+    """
+    if not group_id:
+        group_id = os.environ.get('AUTHORIZED_GROUP_ID')
+    
+    if not group_id:
+        logger.warning("No AUTHORIZED_GROUP_ID configured - group check disabled")
+        return True  # Fail open if not configured
+    
+    # Check cached group membership first
+    user_groups = session.get('user_groups', [])
+    return group_id in user_groups
+
+
+def fetch_user_groups(access_token):
+    """
+    Fetch user's group memberships from Microsoft Graph API
+    
+    Args:
+        access_token: Valid access token with GroupMember.Read.All permission
+    
+    Returns:
+        list: List of group object IDs the user belongs to
+    """
+    import requests
+    
+    try:
+        # Use Microsoft Graph to get user's group memberships
+        graph_url = "https://graph.microsoft.com/v1.0/me/memberOf"
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        print(f"=== FETCHING USER GROUPS FROM: {graph_url} ===")
+        response = requests.get(graph_url, headers=headers)
+        print(f"=== GRAPH API RESPONSE STATUS: {response.status_code} ===")
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Extract group IDs from response
+            groups = [group['id'] for group in data.get('value', []) 
+                     if group.get('@odata.type') == '#microsoft.graph.group']
+            print(f"=== SUCCESSFULLY FETCHED {len(groups)} GROUPS ===")
+            if groups:
+                print(f"=== GROUP IDs: {groups[:3]}{'...' if len(groups) > 3 else ''} ===")
+            logger.info(f"User belongs to {len(groups)} groups")
+            return groups
+        else:
+            error_text = response.text[:500]  # Limit error text length
+            print(f"=== GRAPH API ERROR: {response.status_code} ===")
+            print(f"=== ERROR DETAILS: {error_text} ===")
+            logger.error(f"Failed to fetch groups: {response.status_code} - {error_text}")
+            return []
+            
+    except Exception as e:
+        print(f"=== EXCEPTION FETCHING GROUPS: {str(e)} ===")
+        logger.error(f"Exception fetching user groups: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def group_required(f):
+    """
+    Decorator to protect routes that require group membership
+    
+    Usage:
+        @app.route('/restricted')
+        @group_required
+        def restricted_route():
+            return "This requires group membership"
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # First check if user is authenticated
+        if not session.get('authenticated'):
+            session['next_url'] = request.url
+            return redirect(url_for('login'))
+        
+        # Then check group membership
+        if not check_group_membership():
+            logger.warning(f"Unauthorized access attempt by {session.get('user', {}).get('email')}")
+            return render_template_string("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Access Denied</title>
+                    <style>
+                        body { 
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            height: 100vh;
+                            margin: 0;
+                            background: #f5f5f5;
+                        }
+                        .container {
+                            text-align: center;
+                            background: white;
+                            padding: 3rem;
+                            border-radius: 8px;
+                            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                        }
+                        h1 { color: #d32f2f; margin-bottom: 1rem; }
+                        p { color: #666; margin-bottom: 1.5rem; }
+                        .user-info { 
+                            background: #f5f5f5; 
+                            padding: 1rem; 
+                            border-radius: 4px;
+                            margin-bottom: 1.5rem;
+                            font-size: 0.9em;
+                        }
+                        a { 
+                            color: #0066cc; 
+                            text-decoration: none;
+                            margin: 0 0.5rem;
+                        }
+                        a:hover { text-decoration: underline; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>🔒 Access Denied</h1>
+                        <p>You do not have permission to access this application.</p>
+                        <div class="user-info">
+                            Signed in as: <strong>{{ user.get('email', 'Unknown') }}</strong>
+                        </div>
+                        <p>If you believe you should have access, please contact:</p>
+                        <p><strong>Your IT Team or Accounting VP</strong></p>
+                        <p style="font-size: 0.9em; color: #999; margin-top: 2rem;">
+                            <a href="/logout">Sign Out</a> | 
+                            <a href="/">Return Home</a>
+                        </p>
+                    </div>
+                </body>
+                </html>
+            """, user=session.get('user', {})), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
